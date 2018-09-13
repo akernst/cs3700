@@ -19,14 +19,14 @@ def receiveMessage(sock):
     data = sock.recv(4096)
     mes += data
     if data[-1] == '\n':
-      print('# received message')
+      #print('# received message')
       break
-  print(mes)
+  #print(mes)
   return mes
 
 def sendHello(sock, neuid):
   hello = 'cs3700fall2018 HELLO {}\n'.format(neuid)
-  print('# sending hello message: ' + hello)
+  #print('# sending hello message: ' + hello)
   sock.sendall(hello)
 
 def main():
@@ -34,27 +34,34 @@ def main():
   parser = argparse.ArgumentParser(description='Simple client program')
   parser.add_argument('hostname')
   parser.add_argument('NEU ID')
-  parser.add_argument('-p', default=27993, dest='port', type=int)
+  parser.add_argument('-p', dest='port', type=int)
   parser.add_argument('-s', action="store_true", default=False, dest='ssl')
   args = parser.parse_args(sys.argv[1:]) # arguments exclude filename
-  print(args) # for debug only delete before done
+  #print(args) # for debug only delete before done
 
   hostname = args.hostname
-  port = args.port # shouldnt need int here bc it is converted in parser
+
+  port = 27993
+  if args.port:
+    port = args.port
+  elif args.ssl:
+    port = 27994
+
   neuid = vars(args)['NEU ID']
   secretFlag = ''
 
   # Create a TCP/IP socket
   sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
   if args.ssl:
-    port = 27994
     sock = ssl.wrap_socket(sock, ssl_version=ssl.PROTOCOL_TLSv1)
 
   remote_ip = socket.gethostbyname(hostname)
-  print('# Connecting to server, ' + hostname + ' (' + remote_ip + ')')
+  #print('# Connecting to server, ' + hostname + ' (' + remote_ip + ')')
+  
+  sock.settimeout(5)
   sock.connect((hostname, port))
-  print("# Connected")
+
+  #print("# Connected")
 
   #send HELLO message to the server
   sendHello(sock, neuid)
@@ -66,21 +73,17 @@ def main():
 
     if message_list[1] == "BYE":
       secretFlag = message_list[2]
-      if secretFlag == 'Unknown_Husky_ID':
-        print('# NU ID not recognized')
-      print('# secret flag: ' + secretFlag)
+      print(secretFlag)
       sock.close()
       break
 
     found_count = countInstances(message_list[2], message_list[3])
 
     count = 'cs3700fall2018 COUNT {}\n'.format(found_count)
-    print('# found {} instances of "{}" in the message'.format(found_count, message_list[2]))
-    print('# sending count message: ' + count)
+    #print('# found {} instances of "{}" in the message'.format(found_count, message_list[2]))
+    #print('# sending count message: ' + count)
     sock.sendall(count)
 
 if __name__ == '__main__':
   main()
-
-
-#print >>sys.stderr, 'received "%s"' % message
+  
