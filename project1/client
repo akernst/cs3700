@@ -6,6 +6,7 @@ import socket
 import ssl
 import sys
 
+# return the number of instances of c in searchString
 def countInstances(c, searchString):
   found_count = 0
   for char in searchString:
@@ -13,17 +14,20 @@ def countInstances(c, searchString):
       found_count += 1
   return found_count
 
+# receive an entire message on the specified socket until terminating newline
 def receiveMessage(sock):
   mes = ''
   while 1:
     data = sock.recv(4096)
     mes += data
+    # if last received character was a newline, we're done receiving the message
     if data[-1] == '\n':
       #print('# received message')
       break
   #print(mes)
   return mes
 
+# send the HELLO message for the specified neuid on the provided socket
 def sendHello(sock, neuid):
   hello = 'cs3700fall2018 HELLO {}\n'.format(neuid)
   #print('# sending hello message: ' + hello)
@@ -37,16 +41,18 @@ def main():
   parser.add_argument('-p', dest='port', type=int)
   parser.add_argument('-s', action="store_true", default=False, dest='ssl')
   args = parser.parse_args(sys.argv[1:]) # arguments exclude filename
-  #print(args) # for debug only delete before done
 
+  # get hostname from args
   hostname = args.hostname
 
+  # get port from args if it was set, otherwise if ssl set default to 27994, else 27993
   port = 27993
   if args.port:
     port = args.port
   elif args.ssl:
     port = 27994
 
+  # get neuid from args
   neuid = vars(args)['NEU ID']
   secretFlag = ''
 
@@ -55,28 +61,34 @@ def main():
   if args.ssl:
     sock = ssl.wrap_socket(sock, ssl_version=ssl.PROTOCOL_TLSv1)
 
+  # get remote ip
   remote_ip = socket.gethostbyname(hostname)
   #print('# Connecting to server, ' + hostname + ' (' + remote_ip + ')')
   
+  # set the socket timeout and connect
   sock.settimeout(5)
   sock.connect((hostname, port))
 
-  #print("# Connected")
+  # print("# Connected")
 
-  #send HELLO message to the server
+  # send HELLO message to the server
   sendHello(sock, neuid)
 
+  # event loop
   while 1:
 
+    # receive and parse message
     message = receiveMessage(sock);
     message_list = message.split()
 
+    # BYE case, print secret flag, close socket, and quit
     if message_list[1] == "BYE":
       secretFlag = message_list[2]
       print(secretFlag)
       sock.close()
       break
 
+    # FIND case, count instances and send COUNT reply
     found_count = countInstances(message_list[2], message_list[3])
 
     count = 'cs3700fall2018 COUNT {}\n'.format(found_count)
