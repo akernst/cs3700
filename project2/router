@@ -1,4 +1,4 @@
-#!/usr/bin/env python -u
+#!/usr/bin/python -u
 
 import argparse, socket, time, json, select, struct, math
 
@@ -49,8 +49,8 @@ class Router:
     sockets = None
 
     def __init__(self, networks):
-        self.routes = {}
-        self.updates = {}
+        self.routes = []
+        self.updates = []
         self.relations = {}
         self.sockets = {}
         for relationship in networks:
@@ -131,8 +131,20 @@ class Router:
 
     def update(self, srcif, packet):
         """	handle update packets	"""
-        # TODO 
-        return False
+        self.routes.append(packet[MESG])
+        self.updates.append(packet)
+        
+        for (network, sock) in self.sockets.items():
+            if network == packet[SRCE]:
+                print 'Not sending to origin'
+            elif self.relations[packet[SRCE]] == CUST or self.relations[network] == CUST:
+                print 'Forwarding update message'
+                newpacket = {SRCE: packet[DEST],
+                    DEST: network,
+                    TYPE: UPDT,
+                    MESG: packet[MESG]}
+                sock.send(json.dumps(newpacket))
+        return True
     
     def revoke(self, packet):
         """	handle revoke packets	"""
@@ -146,12 +158,14 @@ class Router:
 
     def handle_packet(self, srcif, packet):
         """	dispatches a packet """
-        # TODO
+        if packet[TYPE] == UPDT:
+            return self.update(srcif, packet)
+            
         return False
 
     def send_error(self, conn, msg):
         """ Send a no_route error message """
-        # TODO
+            
         return
 
     def run(self):
@@ -168,6 +182,11 @@ class Router:
                         if self.sockets[sock] == conn:
                             srcif = sock
                     msg = json.loads(k)
+                    print "Type: " + msg['type']
+                    print "Src:" + msg['src']
+                    print "Dst:" + msg['dst']
+                    print "Msg:" + json.dumps(msg['msg'])
+                    print "=================="
                     if not self.handle_packet(srcif, msg):
                         self.send_error(conn, msg)
                 else:
@@ -175,5 +194,6 @@ class Router:
         return
 
 if __name__ == "__main__":
+    print "router project"
     router = Router(args.networks)
     router.run()
