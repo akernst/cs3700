@@ -1,6 +1,6 @@
 #!/usr/bin/python -u
 
-import argparse, socket, time, json, select, struct, math
+import argparse, socket, time, json, select, struct, math, string, copy
 
 #DEBUG = True
 DEBUG = False
@@ -41,6 +41,14 @@ PROV = "prov"
 
 ##########################################################################################
 
+def ip2bin(ipaddr):
+    binvalue = ''.join(bin(int(x))[2:].zfill(8) for x in ipaddr.split('.'))
+    return binvalue
+
+def nmsk2cidr(nmsk):
+    binip = ip2bin(nmsk)
+    return string.count(binip.split('0')[0], '1')
+
 class Router:
 
     routes = None
@@ -55,6 +63,7 @@ class Router:
         self.sockets = {}
         for relationship in networks:
             network, relation = relationship.split("-")
+            ip2bin(network)
             if DEBUG: 
                 print "Starting socket for", network, relation
             self.sockets[network] = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
@@ -65,8 +74,21 @@ class Router:
 
     def lookup_routes(self, daddr):
         """ Lookup all valid routes for an address """
-        # TODO
         outroutes = []
+
+        daddrbin = ip2bin(daddr)
+        print '++++++++++++++++++++++++++++++++++++++++++++++++++++'
+        print 'DEST ADDR BIN ' + daddrbin
+
+        for route in self.routes:
+            routebin = ip2bin(route[NTWK])
+            print 'ROUTE BIN ' + routebin 
+            cidr = nmsk2cidr(route[NMSK])
+            print 'CIDR ' + str(cidr)
+            if (daddrbin[0:cidr] == routebin[0:cidr]):
+                outroutes.append(route)
+        print 'OUTROUTES ' + json.dumps(outroutes)
+        print '++++++++++++++++++++++++++++++++++++++++++++++++++++'
         return outroutes
 
     def get_shortest_as_path(self, routes):
@@ -102,9 +124,10 @@ class Router:
         """	Select the best route for a given address	"""
         # TODO
         peer = None
-        routes = lookup_routers(daddr)
+        routes = self.lookup_routes(daddr)
         # Rules go here
-        if routes:
+        
+        if not routes:
             # 1. Highest Preference
             routes = self.get_highest_preference(routes)
             # 2. Self Origin
@@ -117,12 +140,29 @@ class Router:
             # TODO
             # Final check: enforce peering relationships
             routes = self.filter_relationships(srcif, routes)
+        
+        print 'MATCHING ROUTES ' + json.dumps(routes)
+
+        if len(routes) == 0:
+            return None
+
+        peer = routes[0]['peer']     
+        print 'FOUND PEER ' + peer
         return self.sockets[peer] if peer else None
 
     def forward(self, srcif, packet):
         """	Forward a data packet	"""
-        # TODO
-        return False
+        route = self.get_route(srcif, packet[DEST])
+        if route: 
+            route.send(json.dumps(packet))
+        else:
+            newpacket = {
+                SRCE: packet[DEST],
+                DEST: packet[SRCE],
+                TYPE: NRTE,
+                MESG: {}}
+            self.sockets[srcif].send(json.dumps(newpacket))
+        return True
 
     def coalesce(self):
         """	coalesce any routes that are right next to each other	"""
@@ -131,7 +171,10 @@ class Router:
 
     def update(self, srcif, packet):
         """	handle update packets	"""
-        self.routes.append(packet[MESG])
+        routeentry = copy.deepcopy(packet[MESG])
+        routeentry['peer'] = srcif        
+
+        self.routes.append(routeentry)
         self.updates.append(packet)
         
         for (network, sock) in self.sockets.items():
@@ -160,7 +203,8 @@ class Router:
         """	dispatches a packet """
         if packet[TYPE] == UPDT:
             return self.update(srcif, packet)
-            
+        if packet[TYPE] == DATA:
+            return self.forward(srcif, packet)    
         return False
 
     def send_error(self, conn, msg):
