@@ -41,10 +41,12 @@ PROV = "prov"
 
 ##########################################################################################
 
+# convert an ip address in a.b.c.d form to a binary string
 def ip2bin(ipaddr):
     binvalue = ''.join(bin(int(x))[2:].zfill(8) for x in ipaddr.split('.'))
     return binvalue
 
+# convert a netmask ip address to a cidr int representation
 def nmsk2cidr(nmsk):
     binip = ip2bin(nmsk)
     return string.count(binip.split('0')[0], '1')
@@ -77,18 +79,22 @@ class Router:
         outroutes = []
 
         daddrbin = ip2bin(daddr)
-        print '++++++++++++++++++++++++++++++++++++++++++++++++++++'
-        print 'DEST ADDR BIN ' + daddrbin
+        if DEBUG:
+            print '++++++++++++++++++++++++++++++++++++++++++++++++++++'
+            print 'DEST ADDR BIN ' + daddrbin
 
+        # iterate over routes, selecting those whose first cidr digits match daddrbin
         for route in self.routes:
             routebin = ip2bin(route[NTWK])
-            print 'ROUTE BIN ' + routebin 
             cidr = nmsk2cidr(route[NMSK])
-            print 'CIDR ' + str(cidr)
+            if DEBUG:
+                print 'CIDR ' + str(cidr)
+                print 'ROUTE BIN ' + routebin 
             if (daddrbin[0:cidr] == routebin[0:cidr]):
                 outroutes.append(route)
-        print 'OUTROUTES ' + json.dumps(outroutes)
-        print '++++++++++++++++++++++++++++++++++++++++++++++++++++'
+        if DEBUG:
+            print 'OUTROUTES ' + json.dumps(outroutes)
+            print '++++++++++++++++++++++++++++++++++++++++++++++++++++'
         return outroutes
 
     def get_shortest_as_path(self, routes):
@@ -125,9 +131,9 @@ class Router:
         # TODO
         peer = None
         routes = self.lookup_routes(daddr)
-        # Rules go here
         
-        if not routes:
+        """
+        if routes:
             # 1. Highest Preference
             routes = self.get_highest_preference(routes)
             # 2. Self Origin
@@ -140,14 +146,12 @@ class Router:
             # TODO
             # Final check: enforce peering relationships
             routes = self.filter_relationships(srcif, routes)
-        
-        print 'MATCHING ROUTES ' + json.dumps(routes)
+        """
 
         if len(routes) == 0:
             return None
 
         peer = routes[0]['peer']     
-        print 'FOUND PEER ' + peer
         return self.sockets[peer] if peer else None
 
     def forward(self, srcif, packet):
@@ -172,16 +176,18 @@ class Router:
     def update(self, srcif, packet):
         """	handle update packets	"""
         routeentry = copy.deepcopy(packet[MESG])
-        routeentry['peer'] = srcif        
+        routeentry[PEER] = srcif        
 
         self.routes.append(routeentry)
         self.updates.append(packet)
         
         for (network, sock) in self.sockets.items():
             if network == packet[SRCE]:
-                print 'Not sending to origin'
+                if DEBUG:
+                    print 'Not sending update to origin'
             elif self.relations[packet[SRCE]] == CUST or self.relations[network] == CUST:
-                print 'Forwarding update message'
+                if DEBUG:
+                    print 'Forwarding update message'
                 newpacket = {SRCE: packet[DEST],
                     DEST: network,
                     TYPE: UPDT,
@@ -196,7 +202,15 @@ class Router:
 
     def dump(self, packet):
         """	handles dump table requests	"""
-        # TODO
+        msg = [{NTWK: x[NTWK], NMSK: x[NMSK], PEER: x[PEER]} for x in self.routes]
+        newpacket = {
+            SRCE: packet[DEST],
+            DEST: packet[SRCE],
+            TYPE: TABL,
+            MESG: msg}
+
+        self.sockets[packet[SRCE]].send(json.dumps(newpacket))
+
         return True
 
     def handle_packet(self, srcif, packet):
@@ -205,6 +219,8 @@ class Router:
             return self.update(srcif, packet)
         if packet[TYPE] == DATA:
             return self.forward(srcif, packet)    
+        if packet[TYPE] == DUMP:
+            return self.dump(packet)
         return False
 
     def send_error(self, conn, msg):
@@ -226,11 +242,12 @@ class Router:
                         if self.sockets[sock] == conn:
                             srcif = sock
                     msg = json.loads(k)
-                    print "Type: " + msg['type']
-                    print "Src:" + msg['src']
-                    print "Dst:" + msg['dst']
-                    print "Msg:" + json.dumps(msg['msg'])
-                    print "=================="
+                    if DEBUG:
+                        print "Type: " + msg['type']
+                        print "Src:" + msg['src']
+                        print "Dst:" + msg['dst']
+                        print "Msg:" + json.dumps(msg['msg'])
+                        print "=================="
                     if not self.handle_packet(srcif, msg):
                         self.send_error(conn, msg)
                 else:
@@ -238,6 +255,5 @@ class Router:
         return
 
 if __name__ == "__main__":
-    print "router project"
     router = Router(args.networks)
     router.run()
