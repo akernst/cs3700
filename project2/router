@@ -2,8 +2,8 @@
 
 import argparse, socket, time, json, select, struct, math, string, copy
 
-#DEBUG = True
-DEBUG = False
+DEBUG = True
+#DEBUG = False
 
 parser = argparse.ArgumentParser(description='route packets')
 parser.add_argument('networks', metavar='networks', type=str, nargs='+', help="networks")
@@ -96,6 +96,7 @@ class Router:
             print 'DEST ADDR BIN ' + daddrbin
 
         # iterate over routes, selecting those whose first cidr digits match daddrbin
+        longestcidr = -1
         for route in self.routes:
             routebin = ip2bin(route[NTWK])
             cidr = nmsk2cidr(route[NMSK])
@@ -103,7 +104,11 @@ class Router:
                 print 'CIDR ' + str(cidr)
                 print 'ROUTE BIN ' + routebin 
             if (daddrbin[0:cidr] == routebin[0:cidr]):
-                outroutes.append(route)
+                if (cidr > longestcidr):
+                    longestcidr = cidr
+                    outroutes = [route]
+                elif (cidr == longestcidr):
+                    outroutes.append(route)
         if DEBUG:
             print 'OUTROUTES ' + json.dumps(outroutes)
             print '++++++++++++++++++++++++++++++++++++++++++++++++++++'
@@ -133,7 +138,7 @@ class Router:
         """ select self originating routes """
         outroutes = []
         for r in routes:
-            if r[SORG] == 'true':
+            if r[SORG] == 'True':
                 outroutes.append(r)
         if len(outroutes) == 0: 
             return routes
@@ -158,7 +163,8 @@ class Router:
     def filter_relationships(self, srcif, routes):
         """ Don't allow Peer->Peer, Peer->Prov, or Prov->Peer forwards """
         outroutes = []
-        print self.relations
+        if DEBUG:
+            print self.relations
         for r in routes:
             if self.relations[srcif] == CUST or self.relations[r[PEER]] == CUST:
                 outroutes.append(r)
@@ -185,7 +191,9 @@ class Router:
             # Final check: enforce peering relationships
             routes = self.filter_relationships(srcif, routes)
 
-        print  routes
+        if DEBUG:
+            print "All Routes Found:"
+            print routes
 
         if len(routes) == 0:
             return None
