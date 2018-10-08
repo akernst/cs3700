@@ -2,8 +2,8 @@
 
 import argparse, socket, time, json, select, struct, math, string, copy
 
-DEBUG = True
-#DEBUG = False
+#DEBUG = True
+DEBUG = False
 
 parser = argparse.ArgumentParser(description='route packets')
 parser.add_argument('networks', metavar='networks', type=str, nargs='+', help="networks")
@@ -40,6 +40,7 @@ PROV = "prov"
 
 ROUTERIP = 'routerip'
 NTWKPRFX = 'networkprefix'
+CIDR = 'cidr'
 
 ##########################################################################################
 
@@ -61,7 +62,7 @@ def nmsk2cidr(nmsk):
 def getprefix(ntwk, nmsk):
     ntwkbin = ip2bin(ntwk)
     cidr = nmsk2cidr(nmsk)
-    return bin2ip(ntwkbin[0:cidr].ljust(32, '0'))
+    return ntwkbin[0:cidr].ljust(32, '0')
 
 class Router:
 
@@ -217,10 +218,29 @@ class Router:
 
     def coalesce(self):
         """ coalesce any routes that are right next to each other   """
-        # TODO (this is the most difficult task, save until last)
-        return False
+        
+        for c in reversed(range(0, 32)): 
+            matched = [r for r in self.routes if r[CIDR] == c]
+    
+            for i in range(len(matched)):
+                for j in range(i+1, len(matched)):
+                    if (matched[i][NTWKPRFX][0:c-1] == matched[j][NTWKPRFX][0:c-1] and matched[i][PEER] == matched[j][PEER]):
+                        if DEBUG:
+                            print "Found a coalesce match"
+                            print matched[i]
+                            print matched[j]
+                        # we can coalesce i and j!
+                        # modify matched[i]
+                        matched[i][CIDR] = c - 1
+                        matched[i][NTWKPRFX] = matched[i][NTWKPRFX][0:c-1].ljust(32, '0')
+                        matched[i][NTWK] = bin2ip(matched[i][NTWKPRFX])
+                        matched[i][NMSK] = bin2ip(''.ljust(c-1, '1').ljust(32, '0'))
+                        # remove matched[j] from self.routes
+                        self.routes.remove(matched[j])        
 
-    def update(self, srcif, packet):
+        return True
+
+    def update(self, srcif, packet, quiet=False):
         """ handle update packets   """
         routeentry = copy.deepcopy(packet[MESG])
         routeentry[PEER] = srcif        
@@ -228,31 +248,45 @@ class Router:
 
         networkprefix = getprefix(routeentry[NTWK], routeentry[NMSK])
         routeentry[NTWKPRFX] = networkprefix
-        
+        routeentry[CIDR] = nmsk2cidr(routeentry[NMSK])
+
         self.routes.append(routeentry)
-        self.updates.append(packet)
         
-        for (network, sock) in self.sockets.items():
-            if network == packet[SRCE]:
-                if DEBUG:
-                    print 'Not sending update to origin'
-            elif self.relations[packet[SRCE]] == CUST or self.relations[network] == CUST:
-                if DEBUG:
-                    print 'Forwarding update message'
-                newpacket = {SRCE: packet[DEST],
-                    DEST: network,
-                    TYPE: UPDT,
-                    MESG: packet[MESG]}
-                sock.send(json.dumps(newpacket))
+        if not quiet:
+            packet["srcif"] = srcif
+            self.updates.append(packet)
+            for (network, sock) in self.sockets.items():
+                if network == packet[SRCE]:
+                    if DEBUG:
+                        print 'Not sending update to origin'
+                elif self.relations[packet[SRCE]] == CUST or self.relations[network] == CUST:
+                    if DEBUG:
+                        print 'Forwarding update message'
+                    newpacket = {SRCE: packet[DEST],
+                        DEST: network,
+                        TYPE: UPDT,
+                        MESG: packet[MESG]}
+                    sock.send(json.dumps(newpacket))
+        
+            self.coalesce()
+
         return True
     
     def revoke(self, packet):
         """ handle revoke packets   """
         self.updates.append(packet)
-        for entry in packet[MESG]:
-            self.routes = [r for r in self.routes if r[NTWK] != entry[NTWK]
-                    or r[NMSK] != entry[NMSK]
-                    or packet[SRCE] != r[PEER]]
+        self.routes = []
+        for update in self.updates:
+            if update[TYPE] == UPDT:
+                self.update(update["srcif"], update, quiet=True)
+            if update[TYPE] == RVKE:
+                for entry in update[MESG]:
+                    self.routes = [r for r in self.routes if r[NTWK] != entry[NTWK]
+                            or r[NMSK] != entry[NMSK]
+                            or packet[SRCE] != r[PEER]]
+
+        self.coalesce()
+
         for (network, sock) in self.sockets.items():
             if network == packet[SRCE]:
                 if DEBUG:
