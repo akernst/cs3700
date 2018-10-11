@@ -38,9 +38,11 @@ CUST = "cust"
 PEER = "peer"
 PROV = "prov"
 
+# other keys
 ROUTERIP = 'routerip'
 NTWKPRFX = 'networkprefix'
 CIDR = 'cidr'
+SRCIF = 'srcif'
 
 ##########################################################################################
 
@@ -51,7 +53,10 @@ def ip2bin(ipaddr):
 
 # convert binary string to a.b.c.d ip address
 def bin2ip(binaddr):
-    ipparts = [int(binaddr[0:8], 2), int(binaddr[8:16], 2), int(binaddr[16:24], 2), int(binaddr[24:32], 2)]
+    ipparts = [int(binaddr[0:8], 2), 
+               int(binaddr[8:16], 2), 
+               int(binaddr[16:24], 2), 
+               int(binaddr[24:32], 2)]
     return ".".join(str(ipp) for ipp in ipparts)
 
 # convert a netmask ip address to a cidr int representation
@@ -59,6 +64,7 @@ def nmsk2cidr(nmsk):
     binip = ip2bin(nmsk)
     return string.count(binip.split('0')[0], '1')
 
+# apply a netmask to a network, both in a.b.c.d form
 def getprefix(ntwk, nmsk):
     ntwkbin = ip2bin(ntwk)
     cidr = nmsk2cidr(nmsk)
@@ -90,7 +96,8 @@ class Router:
     def lookup_routes(self, daddr):
         """ Lookup all valid routes for an address """
         outroutes = []
-
+        
+        # get binary representation of the destination address
         daddrbin = ip2bin(daddr)
         if DEBUG:
             print '++++++++++++++++++++++++++++++++++++++++++++++++++++'
@@ -104,10 +111,14 @@ class Router:
             if DEBUG:
                 print 'CIDR ' + str(cidr)
                 print 'ROUTE BIN ' + routebin 
+            # if the route address matches the destination address, update outroutes
             if (daddrbin[0:cidr] == routebin[0:cidr]):
+                # if the netmask of the ne new route is longer than the 
+                # previously found routes, only match the new route
                 if (cidr > longestcidr):
                     longestcidr = cidr
                     outroutes = [route]
+                # otherwaise go ahead and add the new route to outroutes (multiple matches)
                 elif (cidr == longestcidr):
                     outroutes.append(route)
         if DEBUG:
@@ -154,10 +165,10 @@ class Router:
             outroutes = [r for r in routes if r[ORIG] == 'EGP']
         else:
             outroutes = routes
-        
         return outroutes
 
     def get_lowest_ip_address(self, routes):
+        """ select route with lowest ip address """
         rmin = min([map(int, r[PEER].split('.')) for r in routes])
         return [r for r in routes if map(int, r[PEER].split('.')) == rmin]
 
@@ -174,7 +185,6 @@ class Router:
 
     def get_route(self, srcif, daddr):
         """ Select the best route for a given address   """
-        # TODO
         peer = None
         routes = self.lookup_routes(daddr)
         
@@ -204,10 +214,13 @@ class Router:
 
     def forward(self, srcif, packet):
         """ Forward a data packet   """
+        # find the route
         route = self.get_route(srcif, packet[DEST])
         if route: 
+            # if the route exists, forward the packet
             route.send(json.dumps(packet))
         else:
+            # if the route does not exist, send a NO ROUTE message to the sender
             newpacket = {
                 SRCE: [r[ROUTERIP] for r in self.routes if r[PEER] == srcif][0],
                 DEST: packet[SRCE],
@@ -218,13 +231,18 @@ class Router:
 
     def coalesce(self):
         """ coalesce any routes that are right next to each other   """
-        
+        # iterate from cidr nmsk 32 down to cidr nmsk 0
         for c in reversed(range(0, 32)): 
+            # find all routes with same cidr (candidates to get coalesced)
             matched = [r for r in self.routes if r[CIDR] == c]
     
+            # check every matched against every other matched and check if they can be coalexed
             for i in range(len(matched)):
                 for j in range(i+1, len(matched)):
-                    if (matched[i][NTWKPRFX][0:c-1] == matched[j][NTWKPRFX][0:c-1] and matched[i][PEER] == matched[j][PEER]):
+                    # if all bits match in the network prefix other than the last
+                    # AND the next hop is the same, we can coalesce
+                    if (matched[i][NTWKPRFX][0:c-1] == matched[j][NTWKPRFX][0:c-1] 
+                        and matched[i][PEER] == matched[j][PEER]):
                         if DEBUG:
                             print "Found a coalesce match"
                             print matched[i]
@@ -237,29 +255,33 @@ class Router:
                         matched[i][NMSK] = bin2ip(''.ljust(c-1, '1').ljust(32, '0'))
                         # remove matched[j] from self.routes
                         self.routes.remove(matched[j])        
-
         return True
 
     def update(self, srcif, packet, quiet=False):
         """ handle update packets   """
+                                                                             # add additional information into the route entry
         routeentry = copy.deepcopy(packet[MESG])
-        routeentry[PEER] = srcif        
-        routeentry[ROUTERIP] = packet[DEST]
+        routeentry[PEER] = srcif                                             # the peer
+        routeentry[ROUTERIP] = packet[DEST]                                  # OUR IP address for this route
+        routeentry[NTWKPRFX] = getprefix(routeentry[NTWK], routeentry[NMSK]) # the network prefix
+        routeentry[CIDR] = nmsk2cidr(routeentry[NMSK])                       # cidr representation of the netmask
 
-        networkprefix = getprefix(routeentry[NTWK], routeentry[NMSK])
-        routeentry[NTWKPRFX] = networkprefix
-        routeentry[CIDR] = nmsk2cidr(routeentry[NMSK])
-
-        self.routes.append(routeentry)
+        self.routes.append(routeentry) # add the route to our routes
         
+        # quiet mode is for internal route updates
+        # e.g. rebuilding the routes table after disaggregation
+        # in this case, we don't want to notify neighbors of the update
+        # and we don't want to coalesce (will be performed once after disagg)
         if not quiet:
-            packet["srcif"] = srcif
-            self.updates.append(packet)
-            for (network, sock) in self.sockets.items():
-                if network == packet[SRCE]:
+            packet[SRCIF] = srcif                        # save the srcif on the packet for use in disagg
+            self.updates.append(packet)                  # store the update
+            for (network, sock) in self.sockets.items(): # for each neighbor
+                if network == packet[SRCE]:              # don't send update to who gave it to us
                     if DEBUG:
                         print 'Not sending update to origin'
-                elif self.relations[packet[SRCE]] == CUST or self.relations[network] == CUST:
+                elif self.relations[packet[SRCE]] == CUST or self.relations[network] == CUST: 
+                    # send update message to EVERYONe if the update comes from customer
+                    # send update message to our customers always
                     if DEBUG:
                         print 'Forwarding update message'
                     newpacket = {SRCE: packet[DEST],
@@ -268,25 +290,28 @@ class Router:
                         MESG: packet[MESG]}
                     sock.send(json.dumps(newpacket))
         
+            # coalesce after all this updating
             self.coalesce()
 
         return True
     
     def revoke(self, packet):
         """ handle revoke packets   """
-        self.updates.append(packet)
-        self.routes = []
-        for update in self.updates:
-            if update[TYPE] == UPDT:
-                self.update(update["srcif"], update, quiet=True)
-            if update[TYPE] == RVKE:
+        self.updates.append(packet)  # save the update
+        self.routes = []             # clear out the routes so we can rebuild the table
+        for update in self.updates:  # for each update
+            if update[TYPE] == UPDT: # if its an update, just perform UPDATE in quiet mode
+                self.update(update[SRCIF], update, quiet=True)
+            if update[TYPE] == RVKE: # if its a revoke, remove the requested route
                 for entry in update[MESG]:
                     self.routes = [r for r in self.routes if r[NTWK] != entry[NTWK]
                             or r[NMSK] != entry[NMSK]
                             or packet[SRCE] != r[PEER]]
-
+        
+        # after rebuilding the table naively, then do coalescing (disaggregation)
         self.coalesce()
 
+        # notify neighbors of revoke (same logic as update())
         for (network, sock) in self.sockets.items():
             if network == packet[SRCE]:
                 if DEBUG:
@@ -311,7 +336,6 @@ class Router:
             MESG: msg}
 
         self.sockets[packet[SRCE]].send(json.dumps(newpacket))
-
         return True
 
     def handle_packet(self, srcif, packet):
@@ -325,11 +349,6 @@ class Router:
         if packet[TYPE] == RVKE:
             return self.revoke(packet)
         return False
-
-    def send_error(self, conn, msg):
-        """ Send a no_route error message """
-            
-        return
 
     def run(self):
         while True:
@@ -351,8 +370,7 @@ class Router:
                         print "Dst:" + msg['dst']
                         print "Msg:" + json.dumps(msg['msg'])
                         print "=================="
-                    if not self.handle_packet(srcif, msg):
-                        self.send_error(conn, msg)
+                    self.handle_packet(srcif, msg)
                 else:
                     return
         return
