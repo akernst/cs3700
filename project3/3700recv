@@ -57,7 +57,7 @@ while True:
       # If the EOF flag is set, exit
       if (decoded['eof']):
         buff[decoded['sequence']] = decoded
-        # log("[completed]")
+        log("[eof] " + str(decoded['sequence']) + " (" + str(len(decoded['data'])) + ")" )
         # sys.exit(0)
 
       # If there is data, we accept it and print it out
@@ -65,7 +65,7 @@ while True:
         buff[decoded['sequence']] = decoded
         # If we receive data, we assume it's in-order
         # You will need to do much more here
-        log("[recv data] " + str(decoded['sequence']) + " (" + str(len(decoded['data'])) + ") ACCEPTED (in-order)")
+        log("[recv data] " + str(decoded['sequence']) + " (" + str(len(decoded['data'])) + ") ACCEPTED")
         # sys.stdout.write(decoded['data'])
 
       # Send back an ack to the sender (NOT SACK)
