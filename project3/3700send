@@ -78,7 +78,9 @@ while True:
 
       log("weve got some acks coming up")
       log(str(decoded['ack']))
-      log(str(buff[-1]['sequence']))
+      for i in len(buff):
+        print(buff[i]['sequence'])
+      # log(str(buff[-1]['sequence']))
       if decoded['ack'] - 1 == buff[-1]['sequence']:
 
         # were done woohoo
