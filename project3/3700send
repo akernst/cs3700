@@ -14,6 +14,8 @@ MSG_SIZE = 1500
 DATA_SIZE = 1000
 TIMEOUT = 30
 SEQUENCE = 0
+buff = []
+
 
 # Bind to localhost and an ephemeral port
 IP_PORT = sys.argv[1]
@@ -28,14 +30,18 @@ sock.settimeout(TIMEOUT)
 def log(string):
   sys.stderr.write(datetime.datetime.now().strftime("%H:%M:%S.%f") + " " + string + "\n")
 
+
 def send_next_packet():
   global SEQUENCE
 
   data = sys.stdin.read(DATA_SIZE)
   if (len(data) > 0):
-    msg = json.dumps({"sequence": SEQUENCE, "data": data, "ack": False, "eof": False})
+    msg = {"sequence": SEQUENCE, "data": data, "ack": False, "eof": False}
     SEQUENCE += len(data)
 
+    buff.append(msg)
+
+    msg = json.dumps(msg)
     if sock.sendto(msg, dest) < len(msg):
       log("[error] unable to fully send packet")
     else:
@@ -44,31 +50,47 @@ def send_next_packet():
   else:
     return False
 
-# Send first packet
-send_next_packet()
+# Send all packets 
+def send_all_data():
+  buff = []
+  SEQUENCE = 0
+  while send_next_packet():
+    pass
+  sock.sendto(json.dumps({"eof": True, "data": "", "sequence": SEQUENCE, "ack": False}), dest)
+
+send_all_data()
 
 # Now read in data, send packets
+# resend data if we get two acks in a row for the same sequence number
+lastack = 0
 while True:
   log("ABOUT TO SLEEP")
-  result = sock.recvfrom(MSG_SIZE)
+  result = sock.recvfrom(MSG_SIZE) #receiving ACK
 
   if result:
     (data, addr) = result
     try:
       decoded = json.loads(data)
 
-      # If there is an ack, send next packet
-      if decoded['ack'] == SEQUENCE:
-        log("[recv ack] " + str(SEQUENCE))
+      if decoded['ack'] == buff[-1]['ack']:
+        # were done woohoo
+        break
+      elif decoded['ack'] == lastack:
+        log("[recv ack] " + str(lastack))
+        # resend the data that comes after lastack
+        msgtoresend = buff[buff.indexOf([b for b in buff if b.sequence + len(b.data) == lastack][0]) + 1]
+        if sock.sendto(msgtoresend, dest) < len(msgtoresend):
+          log("[error] unable to fully send packet")
+        else:
+          log("[send data] " + str(lastack) + " (" + str(len(data)) + ")")
 
-        # Try to send next packet; break if no more data
-        if (not send_next_packet()):
-          break
+      lastack = decoded['ack']
+
     except (ValueError, KeyError, TypeError):
       log("[recv corrupt packet]")
   else:
     log("[error] timeout")
-    sys.exit(-1)
+    send_all_data()
 
 sock.sendto(json.dumps({"eof": True, "data": "", "sequence": SEQUENCE, "ack": False}), dest)
 sys.exit(0)

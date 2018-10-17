@@ -10,6 +10,7 @@ import datetime
 import select
 import json
 
+sys.stdout.write("we're working")
 def printMessageInOrder(buff):
   sequence = 0
   while True:
@@ -68,8 +69,26 @@ while True:
         log("[recv data] " + str(decoded['sequence']) + " (" + str(len(decoded['data'])) + ") ACCEPTED (in-order)")
         # sys.stdout.write(decoded['data'])
 
-      # Send back an ack to the sender
-      msg = json.dumps({"ack": decoded['sequence'] + len(decoded['data'])})
+      # Send back an ack to the sender (NOT SACK)
+      sequence = 0
+      preventry = None
+      entry = {"sequence": 0, "data": ""}
+      ackedmsg = None
+      while True:
+        preventry = entry
+        entry = buff.get(sequence)
+        if entry is None:
+          # send ack for previous entry
+          ackedmsg = preventry
+          break
+        elif entry['sequence'] == decoded['sequence']:
+          # send ack for entry
+          ackedmsg = entry
+          break
+        else:
+          sequence += len(entry['data'])
+
+      msg = json.dumps({"ack": ackedmsg['sequence'] + len(ackedmsg['data'])})
       log("ABOUT TO SEND " + msg)
       if sock.sendto(msg, addr) < len(msg):
         log("[error] unable to fully send packet")
