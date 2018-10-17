@@ -77,13 +77,13 @@ while True:
       decoded = json.loads(data)
 
       log("weve got some acks coming up")
-      log(decoded['sequence'])
+      log(decoded['ack'])
       log(buff[-1]['sequence'])
-      if decoded['sequence'] - 1 == buff[-1]['sequence']:
+      if decoded['ack'] - 1 == buff[-1]['sequence']:
 
         # were done woohoo
         break
-      elif decoded['sequence'] == lastack:
+      elif decoded['ack'] == lastack:
         log("[recv ack] " + str(lastack))
         # resend the data that comes after lastack
         msgtoresend = buff[buff.index([b for b in buff if b['sequence'] + len(b['data']) == lastack][0]) + 1]
