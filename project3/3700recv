@@ -73,6 +73,7 @@ while True:
       preventry = None
       entry = {"sequence": 0, "data": ""}
       ackedmsg = None
+      eof? = 0
       while True:
         preventry = entry
         entry = buff.get(sequence)
@@ -83,11 +84,13 @@ while True:
         elif entry['sequence'] == decoded['sequence']:
           # send ack for entry
           ackedmsg = entry
+          if decoded['eof']:
+            eof? = 1
           break
         else:
           sequence += len(entry['data'])
 
-      msg = json.dumps({"ack": ackedmsg['sequence'] + len(ackedmsg['data'])})
+      msg = json.dumps({"ack": ackedmsg['sequence'] + len(ackedmsg['data']) + eof?})
       log("ABOUT TO SEND " + msg)
       if sock.sendto(msg, addr) < len(msg):
         log("[error] unable to fully send packet")
