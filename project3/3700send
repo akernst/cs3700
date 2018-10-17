@@ -33,6 +33,7 @@ def log(string):
 
 def send_next_packet():
   global SEQUENCE
+  global buff
 
   data = sys.stdin.read(DATA_SIZE)
   if (len(data) > 0):
@@ -52,8 +53,11 @@ def send_next_packet():
 
 # Send all packets 
 def send_all_data():
+  global buff
   buff = []
+  global SEQUENCE
   SEQUENCE = 0
+  
   while send_next_packet():
     pass
   sock.sendto(json.dumps({"eof": True, "data": "", "sequence": SEQUENCE, "ack": False}), dest)
