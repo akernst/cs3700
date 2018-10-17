@@ -77,8 +77,8 @@ while True:
       decoded = json.loads(data)
 
       log("weve got some acks coming up")
-      log(decoded['ack'])
-      log(buff[-1]['sequence'])
+      log(str(decoded['ack']))
+      log(str(buff[-1]['sequence']))
       if decoded['ack'] - 1 == buff[-1]['sequence']:
 
         # were done woohoo
