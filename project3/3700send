@@ -82,7 +82,7 @@ while True:
       elif decoded['ack'] == lastack:
         log("[recv ack] " + str(lastack))
         # resend the data that comes after lastack
-        msgtoresend = buff[buff.index([b for b in buff if b.sequence + len(b.data) == lastack][0]) + 1]
+        msgtoresend = buff[buff.index([b for b in buff if b['sequence'] + len(b['data']) == lastack][0]) + 1]
         if sock.sendto(msgtoresend, dest) < len(msgtoresend):
           log("[error] unable to fully send packet")
         else:
