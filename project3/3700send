@@ -76,7 +76,11 @@ while True:
     try:
       decoded = json.loads(data)
 
-      if decoded['ack'] - 1 == buff[-1]['ack']:
+      log("weve got some acks coming up")
+      log(decoded['ack'])
+      log(buff[-1]['ack'])
+      if decoded['ack'] == buff[-1]['ack']:
+
         # were done woohoo
         break
       elif decoded['ack'] == lastack:
