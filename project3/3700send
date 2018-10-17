@@ -60,7 +60,10 @@ def send_all_data():
 
   while send_next_packet():
     pass
-  sock.sendto(json.dumps({"eof": True, "data": "", "sequence": SEQUENCE, "ack": False}), dest)
+    
+  msg = {"eof": True, "data": "", "sequence": SEQUENCE, "ack": False}
+  buff.append(msg)
+  sock.sendto(json.dumps(msg), dest)
 
 send_all_data()
 
