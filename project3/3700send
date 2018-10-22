@@ -107,7 +107,8 @@ index = 0
 lastack = 0
 send_individual_packet(0)
 timeSent = time.time()
-estimated_rtt, dev_rtt = window_timeout
+estimated_rtt = window_timeout
+dev_rtt = window_timeout
 receivedMessage = None
 while True:
   # log("ABOUT TO SLEEP")
