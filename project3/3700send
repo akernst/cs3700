@@ -12,7 +12,7 @@ import json
 
 MSG_SIZE = 1500
 DATA_SIZE = 1000
-TIMEOUT = 30
+TIMEOUT = 1
 SEQUENCE = 0
 buff = []
 window = 20
@@ -47,7 +47,9 @@ def read_all_data():
       break
 
 def send_individual_packet(index):
+  buff[index]['timestamp'] = time.time()
   msg = json.dumps(buff[index])
+
   if sock.sendto(msg, dest) < len(msg):
     log("[error] unable to fully send packet")
   else:
@@ -91,45 +93,60 @@ read_all_data()
 
 sock.settimeout(window_timeout)
 
-highest_acked_seq_num = 0
-while highest_acked_seq_num + 1 < buff[-1]["sequence"]:
-  send_window_packets(highest_acked_seq_num)
-  highest_acked_seq_num = receive_window_acks(highest_acked_seq_num)
+# highest_acked_seq_num = 0
+# while highest_acked_seq_num + 1 < buff[-1]["sequence"]:
+#   send_window_packets(highest_acked_seq_num)
+#   highest_acked_seq_num = receive_window_acks(highest_acked_seq_num)
 
 # connection teardown
-sys.exit(0)
+# sys.exit(0)
 
 # Now read in data, send packets
 # resend data if we get two acks in a row for the same sequence number
+index = 0
 lastack = 0
+send_individual_packet(0)
+timeSent = time.time()
+
+receivedMessage = None
 while True:
-  log("ABOUT TO SLEEP")
+  # log("ABOUT TO SLEEP")
+
+  if not receivedMessage or receivedMessage['timestamp'] - timeReceived < window_timeout:
+    send_individual_packet(index)
+    timeSent = time.time()
+
   result = sock.recvfrom(MSG_SIZE) #receiving ACK
+  timeReceived = time.time()
+
+  sample_rtt = timeReceived - timeSent
+  estimated_rtt = estimated_rtt * 0.875 + sample_rtt * 0.125
+  dev_rtt = 0.75 * dev_rtt + 0.25 * abs(sample_rtt - estimated_rtt)
+  sock.settimeout(estimated_rtt + 4 * dev_rtt)
 
   if result:
     (data, addr) = result
     try:
       decoded = json.loads(data)
+      receivedMessage = decoded
 
-      log("weve got some acks coming up")
-      log(str(decoded['ack']))
-      for b in buff:
-        print(b['sequence'])
-      # log(str(buff[-1]['sequence']))
       if decoded['ack'] - 1 == buff[-1]['sequence']:
-
         # were done woohoo
         break
-      elif decoded['ack'] == lastack:
-        log("[recv ack] " + str(lastack))
-        # resend the data that comes after lastack
-        msgtoresend = buff[buff.index([b for b in buff if b['sequence'] + len(b['data']) == lastack][0]) + 1]
-        if sock.sendto(msgtoresend, dest) < len(msgtoresend):
-          log("[error] unable to fully send packet")
-        else:
-          log("[send data] " + str(lastack) + " (" + str(len(data)) + ")")
+      elif decoded['ack'] == buff.get(index +1)['sequence']:
+        index += 1
+        continue
+      # elif decoded['ack'] == lastack:
+      #   log("[recv ack] " + str(lastack))
+      #   # resend the data that comes after lastack
+      #   msgtoresend = buff[buff.index([b for b in buff if b['sequence'] + len(b['data']) == lastack][0]) + 1]
+      #   if sock.sendto(msgtoresend, dest) < len(msgtoresend):
+      #     log("[error] unable to fully send packet")
+      #   else:
+      #     log("[send data] " + str(lastack) + " (" + str(len(data)) + ")")
 
-      lastack = decoded['ack']
+
+      # lastack = decoded['ack']
 
     except (ValueError, KeyError, TypeError) as e:
       log("[recv corrupt packet]")
