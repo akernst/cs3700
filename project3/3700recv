@@ -86,7 +86,7 @@ while True:
         else:
           sequence += len(entry['data'])
 
-      msg = json.dumps({"ack": ackedmsg['sequence'] + len(ackedmsg['data']) + eof})
+      msg = json.dumps({"ack": ackedmsg['sequence'] + len(ackedmsg['data']) + eof, 'timestamp':ackedmsg['timestamp']})
       log("ABOUT TO SEND " + msg)
       if sock.sendto(msg, addr) < len(msg):
         log("[error] unable to fully send packet")
