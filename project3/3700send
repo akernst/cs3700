@@ -15,7 +15,8 @@ DATA_SIZE = 1000
 TIMEOUT = 30
 SEQUENCE = 0
 buff = []
-
+window = 20
+window_timeout = 0.5
 
 # Bind to localhost and an ephemeral port
 IP_PORT = sys.argv[1]
@@ -30,42 +31,73 @@ sock.settimeout(TIMEOUT)
 def log(string):
   sys.stderr.write(datetime.datetime.now().strftime("%H:%M:%S.%f") + " " + string + "\n")
 
-
-def send_next_packet():
+def read_all_data():
   global SEQUENCE
   global buff
-
-  data = sys.stdin.read(DATA_SIZE)
-  if (len(data) > 0):
-    msg = {"sequence": SEQUENCE, "data": data, "ack": False, "eof": False}
-    SEQUENCE += len(data)
-
-    buff.append(msg)
-
-    msg = json.dumps(msg)
-    if sock.sendto(msg, dest) < len(msg):
-      log("[error] unable to fully send packet")
+  
+  while True:
+    data = sys.stdin.read(DATA_SIZE)
+    if(len(data) > 0):
+      msg = {"sequence": SEQUENCE, "data": data, "ack": False, "eof": False}
+      SEQUENCE += len(data)
+      buff.append(msg)
     else:
-      log("[send data] " + str(SEQUENCE) + " (" + str(len(data)) + ")")
-    return True
+      msg = {"sequence": SEQUENCE, "data": '', "ack": False, "eof": True}
+      buff.append(msg)
+      break
+
+def send_individual_packet(index):
+  msg = json.dumps(buff[index])
+  if sock.sendto(msg, dest) < len(msg):
+    log("[error] unable to fully send packet")
   else:
-    return False
+    log("[send data] " + str(buff[index]["sequence"]) + " (" + str(len(buff[index]["data"])) + ")")
 
-# Send all packets 
-def send_all_data():
-  global buff
-  buff = []
-  global SEQUENCE
-  SEQUENCE = 0
+def send_window_packets(sequence_number):
+  n = buff.index([m for m in buff if m["sequence"] == sequence_number][0])
+  for i in range(n, min(n+window, len(buff))):
+    send_individual_packet(i)
 
-  while send_next_packet():
-    pass
-    
-  msg = {"eof": True, "data": "", "sequence": SEQUENCE, "ack": False}
-  buff.append(msg)
-  sock.sendto(json.dumps(msg), dest)
 
-send_all_data()
+def clear_socket():
+    global sock
+    input = [sock]
+    while 1:
+        inputready, o, e = select.select(input,[],[], 0.0)
+        if len(inputready)==0: break
+        for s in inputready: s.recv(1)
+
+def receive_window_acks(last_acked_seq_num):
+  highest_ack = last_acked_seq_num
+
+  for i in range(0,window):
+    result = sock.recvfrom(MSG_SIZE)
+    if result:
+      (data, addr) = result
+      try:
+        decoded = json.loads(data)
+        log("[recv ack] " + str(decoded["ack"]))
+        if decoded['ack'] > highest_ack:
+          highest_ack = decoded["ack"]
+      except (ValueError, KeyError, TypeError) as e:
+        log("[recv corrupt packet]")
+        raise e
+    else:
+      pass    
+  clear_socket()  
+  return highest_ack
+
+read_all_data()
+
+sock.settimeout(window_timeout)
+
+highest_acked_seq_num = 0
+while highest_acked_seq_num + 1 < buff[-1]["sequence"]:
+  send_window_packets(highest_acked_seq_num)
+  highest_acked_seq_num = receive_window_acks(highest_acked_seq_num)
+
+# connection teardown
+sys.exit(0)
 
 # Now read in data, send packets
 # resend data if we get two acks in a row for the same sequence number

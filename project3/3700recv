@@ -54,19 +54,15 @@ while True:
     try:
       decoded = json.loads(data)
 
-      # If the EOF flag is set, exit
+      # If the EOF flag is set, log and andd to buffer
       if (decoded['eof']):
         buff[decoded['sequence']] = decoded
         log("[eof] " + str(decoded['sequence']) + " (" + str(len(decoded['data'])) + ")" )
-        # sys.exit(0)
 
       # If there is data, we accept it and print it out
       if (decoded['data']):
         buff[decoded['sequence']] = decoded
-        # If we receive data, we assume it's in-order
-        # You will need to do much more here
         log("[recv data] " + str(decoded['sequence']) + " (" + str(len(decoded['data'])) + ") ACCEPTED")
-        # sys.stdout.write(decoded['data'])
 
       # Send back an ack to the sender (NOT SACK)
       sequence = 0
@@ -94,6 +90,13 @@ while True:
       log("ABOUT TO SEND " + msg)
       if sock.sendto(msg, addr) < len(msg):
         log("[error] unable to fully send packet")
+      
+      # make sure the sender gets this eof 
+      if eof:
+        for i in range(0,10):
+          if sock.sendto(msg, addr) < len(msg):
+            log("[error] unable to fully send packet")
+          time.sleep(0.1)
 
       # check if we can hop from 0 to eof
       sequence = 0
