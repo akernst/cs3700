@@ -16,7 +16,7 @@ TIMEOUT = 1
 SEQUENCE = 0
 buff = []
 window = 20
-window_timeout = 0.5
+window_timeout = 0.2
 
 # Bind to localhost and an ephemeral port
 IP_PORT = sys.argv[1]
@@ -138,9 +138,9 @@ while True:
       decoded = json.loads(data)
       receivedMessage = decoded
 
-      log(str(index))
-      log('decoded[ack] = ' + str(decoded['ack']))
-      log('buff[-1][sequence] = ' + str(buff[-1]['sequence']))
+      # log(str(index))
+      # log('decoded[ack] = ' + str(decoded['ack']))
+      # log('buff[-1][sequence] = ' + str(buff[-1]['sequence']))
 
       if decoded['ack'] - 1 == buff[-1]['sequence']:
         log(str(buff[-1]['sequence']) + " all done")
