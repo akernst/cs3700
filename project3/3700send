@@ -91,9 +91,52 @@ def receive_window_acks(last_acked_seq_num):
 
 read_all_data()
 for b in buff:
-  print(b)
+  log(json.dumps(b))
 
-sock.settimeout(window_timeout)
+
+# send a packet THEN begin receiving
+# continue until receive correct packet 
+# OR timeout
+
+index = 0
+while True:
+  log("Beginning send loop for index" + str(index))
+  send_individual_packet(index)
+
+  # receive loop
+  while True:
+    log("Beginning receive loop for index" + str(index))
+    
+    
+    ready = select.select([sock],[],[],0.1)    
+    
+    if ready[0]:
+      (data, addr) = sock.recvfrom(MSG_SIZE)
+      try:
+        # decode the data
+        decoded = json.loads(data)
+        log("Received message from receiver: " + data)
+
+        # first, check if we have received the eof, in which case we are done
+        if decoded['ack'] - 1 == buff[-1]['sequence']:
+          sys.exit(0)
+
+        # next, check if we have received the ack for the current packet, in which case move on o the next send
+        # note, we do not need to check if we're expecting an eof
+        if index != len(buff) -1 and decoded['ack'] == buff[index + 1]['sequence']:
+          log('received correct ack for newly sent packet')
+          # if our packet has been acked, increment the index and keep on keepin' on
+          index += 1
+          break
+
+      except (ValueError, KeyError, TypeError) as e:
+        # received a corrupt packet, keep looping through recv
+        log("[recv corrupt packet]")
+        continue
+    else:
+      # if we timeout, resend the packet
+      log("[error] timeout, resending packet #" + str(index))
+      break
 
 # highest_acked_seq_num = 0
 # while highest_acked_seq_num + 1 < buff[-1]["sequence"]:
