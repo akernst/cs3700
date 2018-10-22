@@ -90,6 +90,8 @@ def receive_window_acks(last_acked_seq_num):
   return highest_ack
 
 read_all_data()
+for b in buff:
+  print(b)
 
 sock.settimeout(window_timeout)
 
@@ -112,6 +114,10 @@ dev_rtt = window_timeout
 receivedMessage = None
 while True:
   # log("ABOUT TO SLEEP")
+
+  #debug
+  if receivedMessage:
+    print(receivedMessage['timestamp'] - timeReceived < window_timeout)
 
   if not receivedMessage or receivedMessage['timestamp'] - timeReceived < window_timeout:
     send_individual_packet(index)
