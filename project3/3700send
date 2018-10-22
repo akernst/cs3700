@@ -112,7 +112,7 @@ timeSent = time.time()
 estimated_rtt = window_timeout
 dev_rtt = window_timeout
 receivedMessage = None
-t = .005
+t = 1
 while True:
   # log("ABOUT TO SLEEP")
 
@@ -128,6 +128,7 @@ while True:
   timeReceived = time.time()
 
   sample_rtt = timeReceived - timeSent
+  log("sample RTT: " + str(sample_rtt))
   estimated_rtt = estimated_rtt * 0.875 + sample_rtt * 0.125
   dev_rtt = 0.75 * dev_rtt + 0.25 * abs(sample_rtt - estimated_rtt)
   t = estimated_rtt + 4 * dev_rtt
