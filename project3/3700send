@@ -141,11 +141,12 @@ while True:
       log(str(index))
       log('decoded[ack] = ' + str(decoded['ack']))
       log('buff[-1][sequence] = ' + str(buff[-1]['sequence']))
+
       if decoded['ack'] - 1 == buff[-1]['sequence']:
         log(str(buff[-1]['sequence']) + " all done")
         # were done woohoo
         break
-      elif decoded['ack'] == buff[index]['sequence'] + len(buff[index]['data']):
+      elif index != len(buff) - 1 and decoded['ack'] == buff[index]['sequence'] + len(buff[index]['data']):
         index += 1
         continue
       # elif decoded['ack'] == lastack:
