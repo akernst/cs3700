@@ -112,14 +112,15 @@ timeSent = time.time()
 estimated_rtt = window_timeout
 dev_rtt = window_timeout
 receivedMessage = None
+t = 1
 while True:
   # log("ABOUT TO SLEEP")
 
   #debug
   if receivedMessage:
-    print(receivedMessage['timestamp'] - timeReceived < window_timeout)
+    print(receivedMessage['timestamp'] - timeReceived < t)
 
-  if not receivedMessage or receivedMessage['timestamp'] - timeReceived < window_timeout:
+  if not receivedMessage or receivedMessage['timestamp'] - timeReceived < t:
     send_individual_packet(index)
     timeSent = time.time()
 
@@ -129,7 +130,8 @@ while True:
   sample_rtt = timeReceived - timeSent
   estimated_rtt = estimated_rtt * 0.875 + sample_rtt * 0.125
   dev_rtt = 0.75 * dev_rtt + 0.25 * abs(sample_rtt - estimated_rtt)
-  sock.settimeout(estimated_rtt + 4 * dev_rtt)
+  t = estimated_rtt + 4 * dev_rtt
+  sock.settimeout(t)
 
   # {"ack": 1001, "timestamp": 1540227032.020532}
   if result:
