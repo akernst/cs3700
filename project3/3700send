@@ -70,6 +70,8 @@ for b in buff:
 # OR timeout
 
 index = 0
+msg_timeout = 0.1
+rtt_moving_avg = 0.1
 while True:
   log("Beginning send loop for index" + str(index))
   send_individual_packet(index)
@@ -78,7 +80,7 @@ while True:
   while True:
     log("Beginning receive loop for index" + str(index))
      
-    ready = select.select([sock],[],[],0.1)    
+    ready = select.select([sock],[],[],msg_timeout)    
     
     if ready[0]:
       (data, addr) = sock.recvfrom(MSG_SIZE)
@@ -86,6 +88,17 @@ while True:
         # decode the data
         decoded = json.loads(data)
         log("Received message from receiver: " + data)
+      
+        # update RTT estimates
+        timeReceived = time.time()
+        timeSent = decoded['timestamp']
+        sample_rtt = timeReceived - timeSent
+        log("sample RTT: " + str(sample_rtt))
+        rtt_moving_avg = rtt_moving_avg * 0.875 + sample_rtt * 0.125
+        msg_timeout = 1.5 * rtt_moving_avg
+
+
+
 
         # first, check if we have received the eof, in which case we are done
         if decoded['ack'] - 1 == buff[-1]['sequence']:
