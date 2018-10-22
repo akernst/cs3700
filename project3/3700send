@@ -125,6 +125,7 @@ while True:
   dev_rtt = 0.75 * dev_rtt + 0.25 * abs(sample_rtt - estimated_rtt)
   sock.settimeout(estimated_rtt + 4 * dev_rtt)
 
+  # {"ack": 1001, "timestamp": 1540227032.020532}
   if result:
     (data, addr) = result
     try:
@@ -132,6 +133,7 @@ while True:
       receivedMessage = decoded
 
       if decoded['ack'] - 1 == buff[-1]['sequence']:
+        log(str(buff[-1]['sequence']) + " all done")
         # were done woohoo
         break
       elif decoded['ack'] == buff[index]['sequence'] + len(buff[index]['data']):
