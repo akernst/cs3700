@@ -108,7 +108,6 @@ sock.settimeout(window_timeout)
 index = 0
 lastack = 0
 send_individual_packet(0)
-timeSent = time.time()
 estimated_rtt = window_timeout
 dev_rtt = window_timeout
 receivedMessage = None
@@ -116,30 +115,25 @@ t = 1
 while True:
   # log("ABOUT TO SLEEP")
 
-  #debug
-  if receivedMessage:
-    print(receivedMessage['timestamp'] - timeReceived < t)
-
   if not receivedMessage or receivedMessage['timestamp'] - timeReceived < t:
     send_individual_packet(index)
-    timeSent = time.time()
 
   result = sock.recvfrom(MSG_SIZE) #receiving ACK
-  timeReceived = time.time()
 
-  sample_rtt = timeReceived - timeSent
-  log("sample RTT: " + str(sample_rtt))
-  estimated_rtt = estimated_rtt * 0.875 + sample_rtt * 0.125
-  dev_rtt = 0.75 * dev_rtt + 0.25 * abs(sample_rtt - estimated_rtt)
-  t = estimated_rtt + 4 * dev_rtt
-  sock.settimeout(t)
-
-  # {"ack": 1001, "timestamp": 1540227032.020532}
   if result:
     (data, addr) = result
     try:
       decoded = json.loads(data)
       receivedMessage = decoded
+      timeReceived = time.time()
+
+      timeSent = receivedMessage['timestamp']
+      sample_rtt = timeReceived - timeSent
+      log("sample RTT: " + str(sample_rtt))
+      estimated_rtt = estimated_rtt * 0.875 + sample_rtt * 0.125
+      dev_rtt = 0.75 * dev_rtt + 0.25 * abs(sample_rtt - estimated_rtt)
+      t = estimated_rtt + 4 * dev_rtt
+      sock.settimeout(t)
 
       # log(str(index))
       # log('decoded[ack] = ' + str(decoded['ack']))
