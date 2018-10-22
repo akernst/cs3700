@@ -10,6 +10,8 @@ import datetime
 import select
 import json
 
+MSG_SIZE = 1500
+
 def printMessageInOrder(buff):
   sequence = 0
   while True:
@@ -24,7 +26,22 @@ def printMessageInOrder(buff):
 def log(string):
   sys.stderr.write(datetime.datetime.now().strftime("%H:%M:%S.%f") + " " + string + "\n")
 
-MSG_SIZE = 1500
+def start_closing(buff):
+  count = 0
+  while count < 10:
+    ready = select.select([sock], [sock], [], 0.1)
+    if ready[0]: # new data from sender cas
+      sock.recvfrom(MSG_SIZE)
+      count = 0
+    if ready[1]: # send ack case
+      log("Resending eof ack")
+      if sock.sendto(msg, addr) < len(msg):
+        log("[error] unable to fully send packet")
+      time.sleep(0.1)
+    count += 1
+  printMessageInOrder(buff)
+  sys.exit(0)
+
 TIMEOUT = 30
 
 # Bind to localhost and an ephemeral port
@@ -93,21 +110,7 @@ while True:
       
       # make sure the sender gets this eof 
       if eof:
-        for i in range(0,10):
-          if sock.sendto(msg, addr) < len(msg):
-            log("[error] unable to fully send packet")
-          time.sleep(0.1)
-
-      # check if we can hop from 0 to eof
-      sequence = 0
-      while True:
-        entry = buff.get(sequence)
-        if entry is None:
-          break
-        elif entry['eof']:
-          printMessageInOrder(buff)
-        else:
-          sequence += len(entry['data'])
+        start_closing(buff)
 
     except (ValueError, KeyError, TypeError) as e:
       log("[recv corrupt packet]")
