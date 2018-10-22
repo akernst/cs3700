@@ -138,7 +138,7 @@ while True:
       decoded = json.loads(data)
       receivedMessage = decoded
 
-      log(index)
+      log(str(index))
       log('decoded[ack] = ' + str(decoded['ack']))
       log('buff[-1][sequence] = ' + str(buff[-1]['sequence']))
       if decoded['ack'] - 1 == buff[-1]['sequence']:
