@@ -78,8 +78,10 @@ rtt_moving_avg = 0.1
 last_seq_num_sent = 0
 last_seq_num_acked = 0
 last_index_acked = 0
-sliding_window_initial_size = 20
+sliding_window_initial_size = 50
 current_window_size = sliding_window_initial_size
+
+eof_sent_once = False
 
 while True:
   # process acks
@@ -129,11 +131,13 @@ while True:
 
   eof = False
   # eof case
-  if last_seq_num_sent == buff[-1]['sequence'] + 1:
+  if last_seq_num_sent == buff[-1]['sequence']:
     eof = True
 
   # send data
+  just_timed_out = False
   if current_window_size == 0:
+    just_timed_out = True
     current_window_size == sliding_window_initial_size
     last_seq_num_sent = last_seq_num_acked
 
@@ -145,13 +149,17 @@ while True:
   
   index_to_send = buff.index(message_to_send)
   
-  if send_individual_packet(index_to_send):
+  # we only want to send eof message if 1) it has not been sent OR 2) we have just reset
+  if eof:
+    if not eof_sent_once or just_timed_out:
+      log("Sending EOF again!!! " + str(eof_sent_once) +" | "+ str(just_timed_out))
+      if send_individual_packet(index_to_send):
+        eof_sent_once = True
+        current_window_size -= 1
+        last_seq_num_sent = message_to_send['sequence'] + 1
+  elif send_individual_packet(index_to_send):
     current_window_size -= 1
     last_seq_num_sent += len(message_to_send['data'])
-    if message_to_send['eof'] == True:
-      last_seq_num_sent = message_to_send['sequence'] + 1 
-      current_window_size = 0 
-  
 
 
 while True:
