@@ -15,8 +15,12 @@ DATA_SIZE = 1000
 TIMEOUT = 1
 SEQUENCE = 0
 buff = []
-window = 20
+window = 10
 window_timeout = 0.2
+
+
+
+msg_timeout = 0.5
 
 # Bind to localhost and an ephemeral port
 IP_PORT = sys.argv[1]
@@ -48,6 +52,7 @@ def read_all_data():
 
 def send_individual_packet(index):
   buff[index]['timestamp'] = time.time()
+  buff[index]['timeout'] = msg_timeout
   msg = json.dumps(buff[index])
 
   if sock.sendto(msg, dest) < len(msg):
@@ -72,23 +77,29 @@ for b in buff:
 # OR timeout
 
 index = 0
-msg_timeout = 0.1
-rtt_moving_avg = 0.1
+rtt_moving_avg = 0.5
 
 last_seq_num_sent = 0
 last_seq_num_acked = 0
 last_index_acked = 0
-sliding_window_initial_size = 50
+sliding_window_initial_size = 20
 current_window_size = sliding_window_initial_size
 
 eof_sent_once = False
 
 while True:
   # process acks
+  timed_out = True
   ready = []
   if current_window_size == 0:
+    log("Waiting for acks on timeout")
     ready = select.select([sock],[],[],msg_timeout) # select with timeeout
+    if ready[0]:
+      timed_out = False
+    log("Timed Out? " + str(timed_out))
+
   
+     
   while True:
     ready = select.select([sock],[],[],0) # poll for readable
     if ready[0]:
@@ -96,6 +107,8 @@ while True:
       (data, addr) = sock.recvfrom(MSG_SIZE)
       try:
         decoded = json.loads(data)
+        
+        log("Ack Received: Ack # " + str(decoded['ack']))
 
         # update RTT estimates
         timeReceived = time.time()
@@ -112,7 +125,7 @@ while True:
         # if ack is different from last highest ack, we have a new highest ack
         # and we update window size by number of unacked packets between the two "highest acks"
         # also, if our new highest ack is greater than last seq num sent, update last sent
-        if decoded['ack'] != last_seq_num_acked:
+        if decoded['ack'] > last_seq_num_acked:
           message_just_acked = [m for m in buff if m['sequence'] == decoded['ack']][0]
           message_index = buff.index(message_just_acked)
           current_window_size += message_index - last_index_acked
@@ -129,17 +142,19 @@ while True:
     else:
       break
 
-  eof = False
-  # eof case
-  if last_seq_num_sent == buff[-1]['sequence']:
-    eof = True
-
-  # send data
+    # send data
   just_timed_out = False
   if current_window_size == 0:
     just_timed_out = True
-    current_window_size == sliding_window_initial_size
+    current_window_size = sliding_window_initial_size
     last_seq_num_sent = last_seq_num_acked
+    eof_sent_once = False
+
+  eof = False
+  # eof case
+  if last_seq_num_sent >= buff[-1]['sequence']:
+    eof = True
+
 
   message_to_send = None
   if eof:
@@ -155,7 +170,7 @@ while True:
       log("Sending EOF again!!! " + str(eof_sent_once) +" | "+ str(just_timed_out))
       if send_individual_packet(index_to_send):
         eof_sent_once = True
-        current_window_size -= 1
+        current_window_size = 0
         last_seq_num_sent = message_to_send['sequence'] + 1
   elif send_individual_packet(index_to_send):
     current_window_size -= 1

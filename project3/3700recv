@@ -24,7 +24,7 @@ def printMessageInOrder(buff):
       sequence += len(entry['data'])
 
 def log(string):
-  sys.stderr.write(datetime.datetime.now().strftime("%H:%M:%S.%f") + " " + string + "\n")
+  sys.stderr.write("\t\t\t\t\t"+datetime.datetime.now().strftime("%H:%M:%S.%f") + " " + string + "\n")
 
 def start_closing(buff):
   count = 0
@@ -58,7 +58,8 @@ UDP_PORT = sock.getsockname()[1]
 log("[bound] " + str(UDP_PORT))
 
 buff = {}
-
+time_last_acked = {}
+ack_count = {}
 # Now listen for packets
 while True:
 
@@ -84,7 +85,7 @@ while True:
       # Send back an ack to the sender (NOT SACK)
       sequence = 0
       preventry = None
-      entry = {"sequence": 0, "data": ""}
+      entry = {"sequence": 0, "data": "", "timestamp": decoded['timestamp'], "eof": False}
       ackedmsg = None
       eof = 0
       while True:
@@ -94,27 +95,32 @@ while True:
           # send ack for previous entry
           ackedmsg = preventry
           break
-        elif entry['sequence'] == decoded['sequence']:
-          # send ack for entry
-          ackedmsg = entry
-          if decoded['eof']:
-            eof = 1
-          break
         else:
+          if entry['eof']:
+            eof = 1
+            ackedmsg = entry
+            break
           sequence += len(entry['data'])
 
-      msg = json.dumps({"ack": ackedmsg['sequence'] + len(ackedmsg['data']) + eof, 'timestamp':ackedmsg['timestamp']})
-      log("ABOUT TO SEND " + msg)
-      if sock.sendto(msg, addr) < len(msg):
-        log("[error] unable to fully send packet")
-      
+      if ackedmsg['eof']:
+        eof = 1 
+
+      # right here allow sending ack 5 times within window
+      if not time_last_acked.get(ackedmsg['sequence']) or time.time() - time_last_acked[ackedmsg['sequence']] > decoded['timeout'] or ack_count[ackedmsg['sequence']] < 5:
+        ack_count[ackedmsg['sequence']] = time_last_acked.get(ackedmsg['sequence']) ? ack_count[ackedmsg['sequence']] + 1 : 1
+        time_last_acked[ackedmsg['sequence']] = time.time()
+        msg = json.dumps({"ack": ackedmsg['sequence'] + len(ackedmsg['data']) + eof, 'timestamp':ackedmsg['timestamp']})
+        log("ABOUT TO SEND " + msg)
+        if sock.sendto(msg, addr) < len(msg):
+          log("[error] unable to fully send packet")
+      else: 
+        log("Not sending duplicate ack ("+str(ackedmsg['sequence'] + len(ackedmsg['data']) + eof) +")within timeout")
       # make sure the sender gets this eof 
       if eof:
         start_closing(buff)
 
     except (ValueError, KeyError, TypeError) as e:
       log("[recv corrupt packet]")
-      raise e
   else:
     log("[error] timeout")
     sys.exit(-1)
