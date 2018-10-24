@@ -58,8 +58,8 @@ UDP_PORT = sock.getsockname()[1]
 log("[bound] " + str(UDP_PORT))
 
 buff = {}
-time_last_acked = {}
-ack_count = {}
+time_last_acked = {0: 0}
+ack_count = {0: 0}
 # Now listen for packets
 while True:
 
@@ -81,6 +81,10 @@ while True:
       if (decoded['data']):
         buff[decoded['sequence']] = decoded
         log("[recv data] " + str(decoded['sequence']) + " (" + str(len(decoded['data'])) + ") ACCEPTED")
+
+      if not time_last_acked.get(decoded['sequence']):
+        time_last_acked[decoded['sequence']] = 0
+        ack_count[decoded['sequence']] = 0
 
       # Send back an ack to the sender (NOT SACK)
       sequence = 0
@@ -106,9 +110,16 @@ while True:
         eof = 1 
 
       # right here allow sending ack 5 times within window
-      if not time_last_acked.get(ackedmsg['sequence']) or time.time() - time_last_acked[ackedmsg['sequence']] > decoded['timeout'] or ack_count[ackedmsg['sequence']] < 5:
-        ack_count[ackedmsg['sequence']] = time_last_acked.get(ackedmsg['sequence']) ? ack_count[ackedmsg['sequence']] + 1 : 1
+      timed_out = time.time() - time_last_acked[ackedmsg['sequence']] > decoded['timeout']
+      if timed_out:
+        ack_count[ackedmsg['sequence']] = 0
         time_last_acked[ackedmsg['sequence']] = time.time()
+
+      if timed_out or ack_count[ackedmsg['sequence']] < 5:
+        ack_count[ackedmsg['sequence']] = ack_count[ackedmsg['sequence']] + 1
+
+        #  ack_count[ackedmsg['sequence']] = time_last_acked.get(ackedmsg['sequence']) ? ack_count[ackedmsg['sequence']] + 1 : 1
+        
         msg = json.dumps({"ack": ackedmsg['sequence'] + len(ackedmsg['data']) + eof, 'timestamp':ackedmsg['timestamp']})
         log("ABOUT TO SEND " + msg)
         if sock.sendto(msg, addr) < len(msg):

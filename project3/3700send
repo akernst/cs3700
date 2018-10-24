@@ -89,9 +89,10 @@ eof_sent_once = False
 
 while True:
   # process acks
-  timed_out = True
+  timed_out = False
   ready = []
   if current_window_size == 0:
+    timed_out = True
     log("Waiting for acks on timeout")
     ready = select.select([sock],[],[],msg_timeout) # select with timeeout
     if ready[0]:
@@ -143,12 +144,13 @@ while True:
       break
 
     # send data
-  just_timed_out = False
-  if current_window_size == 0:
-    just_timed_out = True
+  if timed_out:
     current_window_size = sliding_window_initial_size
     last_seq_num_sent = last_seq_num_acked
     eof_sent_once = False
+
+  if eof_sent_once:
+    current_window_size = 0
 
   eof = False
   # eof case
@@ -165,16 +167,30 @@ while True:
   index_to_send = buff.index(message_to_send)
   
   # we only want to send eof message if 1) it has not been sent OR 2) we have just reset
-  if eof:
-    if not eof_sent_once or just_timed_out:
-      log("Sending EOF again!!! " + str(eof_sent_once) +" | "+ str(just_timed_out))
-      if send_individual_packet(index_to_send):
-        eof_sent_once = True
-        current_window_size = 0
-        last_seq_num_sent = message_to_send['sequence'] + 1
-  elif send_individual_packet(index_to_send):
-    current_window_size -= 1
-    last_seq_num_sent += len(message_to_send['data'])
+  if current_window_size:
+    if eof:
+      if not eof_sent_once:
+        log("Sending EOF again!!! " + str(eof_sent_once) +" | "+ str(timed_out))
+        if send_individual_packet(index_to_send):
+          eof_sent_once = True
+          current_window_size = 0
+          last_seq_num_sent = message_to_send['sequence'] + 1
+    elif send_individual_packet(index_to_send):
+      current_window_size -= 1
+      last_seq_num_sent += len(message_to_send['data'])
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 while True:
