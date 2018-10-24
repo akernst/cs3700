@@ -52,8 +52,10 @@ def send_individual_packet(index):
 
   if sock.sendto(msg, dest) < len(msg):
     log("[error] unable to fully send packet")
+    return False
   else:
     log("[send data] " + str(buff[index]["sequence"]) + " (" + str(len(buff[index]["data"])) + ")")
+    return True
 
 def send_window_packets(sequence_number):
   n = buff.index([m for m in buff if m["sequence"] == sequence_number][0])
@@ -72,6 +74,86 @@ for b in buff:
 index = 0
 msg_timeout = 0.1
 rtt_moving_avg = 0.1
+
+last_seq_num_sent = 0
+last_seq_num_acked = 0
+last_index_acked = 0
+sliding_window_initial_size = 20
+current_window_size = sliding_window_initial_size
+
+while True:
+  # process acks
+  ready = []
+  if current_window_size == 0:
+    ready = select.select([sock],[],[],msg_timeout) # select with timeeout
+  
+  while True:
+    ready = select.select([sock],[],[],0) # poll for readable
+    if ready[0]:
+      # process ack
+      (data, addr) = sock.recvfrom(MSG_SIZE)
+      try:
+        decoded = json.loads(data)
+
+        # update RTT estimates
+        timeReceived = time.time()
+        timeSent = decoded['timestamp']
+        sample_rtt = timeReceived - timeSent
+        rtt_moving_avg = rtt_moving_avg * 0.875 + sample_rtt * 0.125
+        msg_timeout = 1.5 * rtt_moving_avg
+        
+        # if we got final ack, quit
+        if decoded['ack'] - 1 == buff[-1]['sequence']:
+          sys.exit(0)
+
+        # if ack is the same as last highest ack, do nothing
+        # if ack is different from last highest ack, we have a new highest ack
+        # and we update window size by number of unacked packets between the two "highest acks"
+        # also, if our new highest ack is greater than last seq num sent, update last sent
+        if decoded['ack'] != last_seq_num_acked:
+          message_just_acked = [m for m in buff if m['sequence'] == decoded['ack']][0]
+          message_index = buff.index(message_just_acked)
+          current_window_size += message_index - last_index_acked
+          last_index_acked = message_index
+          last_seq_num_acked = decoded['ack']
+          if last_seq_num_acked > last_seq_num_sent:
+            last_seq_num_sent = last_seq_num_acked
+
+      except (ValueError, KeyError, TypeError) as e:
+        # received a corrupt packet, keep looping through recv
+        log("[recv corrupt packet]")
+        continue
+
+    else:
+      break
+
+  eof = False
+  # eof case
+  if last_seq_num_sent == buff[-1]['sequence'] + 1:
+    eof = True
+
+  # send data
+  if current_window_size == 0:
+    current_window_size == sliding_window_initial_size
+    last_seq_num_sent = last_seq_num_acked
+
+  message_to_send = None
+  if eof:
+    message_to_send = buff[-1]
+  else:
+    message_to_send = [m for m in buff if m["sequence"] == last_seq_num_sent][0]
+  
+  index_to_send = buff.index(message_to_send)
+  
+  if send_individual_packet(index_to_send):
+    current_window_size -= 1
+    last_seq_num_sent += len(message_to_send['data'])
+    if message_to_send['eof'] == True:
+      last_seq_num_sent = message_to_send['sequence'] + 1 
+      current_window_size = 0 
+  
+
+
 while True:
   log("Beginning send loop for index" + str(index))
   send_individual_packet(index)
