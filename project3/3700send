@@ -14,13 +14,10 @@ MSG_SIZE = 1500
 DATA_SIZE = 1000
 TIMEOUT = 1
 SEQUENCE = 0
-buff = []
-window = 10
-window_timeout = 0.2
 
+buff = [] # buffer to store data parsed into messages
 
-
-msg_timeout = 0.5
+msg_timeout = 0.5 # inital timeout
 
 # Bind to localhost and an ephemeral port
 IP_PORT = sys.argv[1]
@@ -35,6 +32,7 @@ sock.settimeout(TIMEOUT)
 def log(string):
   sys.stderr.write(datetime.datetime.now().strftime("%H:%M:%S.%f") + " " + string + "\n")
 
+# read all the data into the buffer, parsing into our message format
 def read_all_data():
   global SEQUENCE
   global buff
@@ -50,11 +48,13 @@ def read_all_data():
       buff.append(msg)
       break
 
+# send the index-th packet in the buffer
 def send_individual_packet(index):
-  buff[index]['timestamp'] = time.time()
-  buff[index]['timeout'] = msg_timeout
-  msg = json.dumps(buff[index])
-
+  buff[index]['timestamp'] = time.time() # add the current timestamp in for use in estimating RTT
+  buff[index]['timeout'] = msg_timeout # tell the receiver our current timeout for use in ack timeout
+  msg = json.dumps(buff[index]) # turn the message into a string
+  
+  # try and send the message
   if sock.sendto(msg, dest) < len(msg):
     log("[error] unable to fully send packet")
     return False
@@ -62,63 +62,55 @@ def send_individual_packet(index):
     log("[send data] " + str(buff[index]["sequence"]) + " (" + str(len(buff[index]["data"])) + ")")
     return True
 
-def send_window_packets(sequence_number):
-  n = buff.index([m for m in buff if m["sequence"] == sequence_number][0])
-  for i in range(n, min(n+window, len(buff))):
-    send_individual_packet(i)
-
+# read all the data
 read_all_data()
-for b in buff:
-  log(json.dumps(b))
 
 
-# send a packet THEN begin receiving
-# continue until receive correct packet 
-# OR timeout
+rtt_moving_avg = 0.5 # initial value for the rtt moving average 
 
-index = 0
-rtt_moving_avg = 0.5
+last_seq_num_sent = 0 # the last sequence number we sent 
+last_seq_num_acked = 0 # the last sequence number for which we received an ack
+# (note, these are not really the sequence numbers we sent, but the ack numbers we expect to receive from their sending)
 
-last_seq_num_sent = 0
-last_seq_num_acked = 0
-last_index_acked = 0
-sliding_window_initial_size = 20
-current_window_size = sliding_window_initial_size
+last_index_acked = 0 # the index in our buffer corresponding to the ack we last received
 
-eof_sent_once = False
+sliding_window_initial_size = 20 # initial size of our sliding window
+current_window_size = sliding_window_initial_size # current window size
 
+eof_sent_once = False # keep track of whether we have sent the eof already this timeout window
+
+# THE LOOP
 while True:
-  # process acks
+
+  # receiving data portion of THE LOOP
+
+  # for every run through the loop we want to keep track of whether a timeout occurred
   timed_out = False
-  ready = []
+  
+  # if the current window size is 0, then we want to wait on the estimated timeout for a message
   if current_window_size == 0:
-    timed_out = True
-    log("Waiting for acks on timeout")
+    timed_out = True # unless we receive a message while waiting, we will have timed out
     ready = select.select([sock],[],[],msg_timeout) # select with timeeout
     if ready[0]:
-      timed_out = False
-    log("Timed Out? " + str(timed_out))
-
+      timed_out = False # if we did manage to receive an ack, well then I guess we didn't time out after all
   
-     
+  # loop to keep receiving acks until there are no more waiting to be read   
   while True:
-    ready = select.select([sock],[],[],0) # poll for readable
+    ready = select.select([sock],[],[],0) # poll to see if we have an ack to read
     if ready[0]:
-      # process ack
+      # read the data if it exists
       (data, addr) = sock.recvfrom(MSG_SIZE)
       try:
         decoded = json.loads(data)
         
-        log("Ack Received: Ack # " + str(decoded['ack']))
-
-        # update RTT estimates
+        # update RTT estimate and corresponding timeout value
         timeReceived = time.time()
         timeSent = decoded['timestamp']
         sample_rtt = timeReceived - timeSent
         rtt_moving_avg = rtt_moving_avg * 0.875 + sample_rtt * 0.125
         msg_timeout = 1.5 * rtt_moving_avg
         
-        # if we got final ack, quit
+        # if we got final ack, just quit gracefully
         if decoded['ack'] - 1 == buff[-1]['sequence']:
           sys.exit(0)
 
@@ -127,190 +119,66 @@ while True:
         # and we update window size by number of unacked packets between the two "highest acks"
         # also, if our new highest ack is greater than last seq num sent, update last sent
         if decoded['ack'] > last_seq_num_acked:
-          message_just_acked = [m for m in buff if m['sequence'] == decoded['ack']][0]
-          message_index = buff.index(message_just_acked)
-          current_window_size += message_index - last_index_acked
-          last_index_acked = message_index
-          last_seq_num_acked = decoded['ack']
-          if last_seq_num_acked > last_seq_num_sent:
-            last_seq_num_sent = last_seq_num_acked
+          message_just_acked = [m for m in buff if m['sequence'] == decoded['ack']][0] # figure out which message we just received an ack for
+          message_index = buff.index(message_just_acked) # figure out its index in our buffer
+          current_window_size += message_index - last_index_acked # update the current window size based on the index last acked and this ack
+                                                                  # note: it will remain unchanged if we have already received this ack
+          last_index_acked = message_index # this message is now the new last index acked
+          last_seq_num_acked = decoded['ack'] # this message is not the last sequence number acked
+          if last_seq_num_acked > last_seq_num_sent: # if the ack we received is farther along than where we currently are in sending, such as
+            last_seq_num_sent = last_seq_num_acked   # when we reset after a timeout but finally received the acks, fast forward where we are in the sending
 
       except (ValueError, KeyError, TypeError) as e:
         # received a corrupt packet, keep looping through recv
         log("[recv corrupt packet]")
         continue
 
-    else:
+    else: # if there was no ack to read, break out of the loop
       break
 
-    # send data
+
+  # sending data portion of THE LOOP
+
+  # if we just timed out, reset the current window size to the initial value
+  # and start sending again from the last place we successfully received an ack from
+  # and mark that we have not yet sent an eof during this timeout window
   if timed_out:
     current_window_size = sliding_window_initial_size
     last_seq_num_sent = last_seq_num_acked
     eof_sent_once = False
 
+  # if we have already sent the eof this timeout window, set the current window size to 0 so we dont send it again 
+  # and so that we wait on a timeout for its acknowledgement in the next run of THE LOOP
   if eof_sent_once:
     current_window_size = 0
 
+  # check whether what we are about to send is the EOF
   eof = False
-  # eof case
   if last_seq_num_sent >= buff[-1]['sequence']:
     eof = True
 
-
+  # grab the message we want to send out of the buffer
   message_to_send = None
   if eof:
     message_to_send = buff[-1]
   else:
     message_to_send = [m for m in buff if m["sequence"] == last_seq_num_sent][0]
   
+  # figure out the index of the message we want to send
   index_to_send = buff.index(message_to_send)
   
   # we only want to send eof message if 1) it has not been sent OR 2) we have just reset
+  # only send a message if the window size isn't 0
   if current_window_size:
+    # only send eof message if hasn't yet been sent this timeout window
     if eof:
       if not eof_sent_once:
-        log("Sending EOF again!!! " + str(eof_sent_once) +" | "+ str(timed_out))
+        # if we successfully send it
         if send_individual_packet(index_to_send):
-          eof_sent_once = True
-          current_window_size = 0
-          last_seq_num_sent = message_to_send['sequence'] + 1
-    elif send_individual_packet(index_to_send):
-      current_window_size -= 1
-      last_seq_num_sent += len(message_to_send['data'])
+          eof_sent_once = True # note that we have sent it once now this timeout window
+          current_window_size = 0 # reset the current window size to 0 so we wait on a timeout next run through THE LOOP
+          last_seq_num_sent = message_to_send['sequence'] + 1 # update last sequence number sent
+    elif send_individual_packet(index_to_send): # if we're sending a data packet, try to send it
+      current_window_size -= 1 # if we succeed in sending it, decrement the current window size
+      last_seq_num_sent += len(message_to_send['data']) # update the last sequence number sent 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-while True:
-  log("Beginning send loop for index" + str(index))
-  send_individual_packet(index)
-
-  # receive loop
-  while True:
-    log("Beginning receive loop for index" + str(index))
-     
-    ready = select.select([sock],[],[],msg_timeout)    
-    
-    if ready[0]:
-      (data, addr) = sock.recvfrom(MSG_SIZE)
-      try:
-        # decode the data
-        decoded = json.loads(data)
-        log("Received message from receiver: " + data)
-      
-        # update RTT estimates
-        timeReceived = time.time()
-        timeSent = decoded['timestamp']
-        sample_rtt = timeReceived - timeSent
-        log("sample RTT: " + str(sample_rtt))
-        rtt_moving_avg = rtt_moving_avg * 0.875 + sample_rtt * 0.125
-        msg_timeout = 1.5 * rtt_moving_avg
-
-
-
-
-        # first, check if we have received the eof, in which case we are done
-        if decoded['ack'] - 1 == buff[-1]['sequence']:
-          sys.exit(0)
-
-        # next, check if we have received the ack for the current packet, in which case move on o the next send
-        # note, we do not need to check if we're expecting an eof
-        if index != len(buff) -1 and decoded['ack'] == buff[index + 1]['sequence']:
-          log('received correct ack for newly sent packet')
-          # if our packet has been acked, increment the index and keep on keepin' on
-          index += 1
-          break
-
-      except (ValueError, KeyError, TypeError) as e:
-        # received a corrupt packet, keep looping through recv
-        log("[recv corrupt packet]")
-        continue
-    else:
-      # if we timeout, resend the packet
-      log("[error] timeout, resending packet #" + str(index))
-      break
-
-# highest_acked_seq_num = 0
-# while highest_acked_seq_num + 1 < buff[-1]["sequence"]:
-#   send_window_packets(highest_acked_seq_num)
-#   highest_acked_seq_num = receive_window_acks(highest_acked_seq_num)
-
-# connection teardown
-# sys.exit(0)
-
-# Now read in data, send packets
-# resend data if we get two acks in a row for the same sequence number
-index = 0
-lastack = 0
-send_individual_packet(0)
-estimated_rtt = window_timeout
-dev_rtt = window_timeout
-receivedMessage = None
-t = 1
-while True:
-  # log("ABOUT TO SLEEP")
-
-  if not receivedMessage or receivedMessage['timestamp'] - timeReceived < t:
-    send_individual_packet(index)
-
-  result = sock.recvfrom(MSG_SIZE) #receiving ACK
-
-  if result:
-    (data, addr) = result
-    try:
-      decoded = json.loads(data)
-      receivedMessage = decoded
-      timeReceived = time.time()
-
-      timeSent = receivedMessage['timestamp']
-      sample_rtt = timeReceived - timeSent
-      log("sample RTT: " + str(sample_rtt))
-      estimated_rtt = estimated_rtt * 0.875 + sample_rtt * 0.125
-      dev_rtt = 0.75 * dev_rtt + 0.25 * abs(sample_rtt - estimated_rtt)
-      t = estimated_rtt + 4 * dev_rtt
-      sock.settimeout(t)
-
-      # log(str(index))
-      # log('decoded[ack] = ' + str(decoded['ack']))
-      # log('buff[-1][sequence] = ' + str(buff[-1]['sequence']))
-
-      if decoded['ack'] - 1 == buff[-1]['sequence']:
-        log(str(buff[-1]['sequence']) + " all done")
-        # were done woohoo
-        break
-      elif index != len(buff) - 1 and decoded['ack'] == buff[index]['sequence'] + len(buff[index]['data']):
-        index += 1
-        continue
-      # elif decoded['ack'] == lastack:
-      #   log("[recv ack] " + str(lastack))
-      #   # resend the data that comes after lastack
-      #   msgtoresend = buff[buff.index([b for b in buff if b['sequence'] + len(b['data']) == lastack][0]) + 1]
-      #   if sock.sendto(msgtoresend, dest) < len(msgtoresend):
-      #     log("[error] unable to fully send packet")
-      #   else:
-      #     log("[send data] " + str(lastack) + " (" + str(len(data)) + ")")
-
-
-      # lastack = decoded['ack']
-
-    except (ValueError, KeyError, TypeError) as e:
-      log("[recv corrupt packet]")
-      raise e
-  else:
-    log("[error] timeout")
-    send_all_data()
-
-sock.sendto(json.dumps({"eof": True, "data": "", "sequence": SEQUENCE, "ack": False}), dest)
-sys.exit(0)
