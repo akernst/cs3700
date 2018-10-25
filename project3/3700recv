@@ -12,6 +12,7 @@ import json
 
 MSG_SIZE = 1500
 
+# print the entire message
 def printMessageInOrder(buff):
   sequence = 0
   while True:
@@ -26,6 +27,8 @@ def printMessageInOrder(buff):
 def log(string):
   sys.stderr.write("\t\t\t\t\t"+datetime.datetime.now().strftime("%H:%M:%S.%f") + " " + string + "\n")
 
+# begin the shutdown process, sending eof ack ten times with 0.1 second wait in between
+# if we receive another packet during shutdown, reset the timeer
 def start_closing(buff):
   count = 0
   while count < 10:
@@ -42,6 +45,7 @@ def start_closing(buff):
   printMessageInOrder(buff)
   sys.exit(0)
 
+
 TIMEOUT = 30
 
 # Bind to localhost and an ephemeral port
@@ -57,12 +61,14 @@ sock.settimeout(TIMEOUT)
 UDP_PORT = sock.getsockname()[1]
 log("[bound] " + str(UDP_PORT))
 
-buff = {}
-time_last_acked = {0: 0}
-ack_count = {0: 0}
+buff = {} # dictionary to store received messages
+time_last_acked = {0: 0} # dictionary mapping sequence numbers to time last ack window started
+ack_count = {0: 0} # dictionary mapping sequence numbers to number of times acked this ack window
+
 # Now listen for packets
 while True:
 
+  # receive a packet
   result = sock.recvfrom(MSG_SIZE)
 
   # If nothing is ready, we hit the timeout
@@ -72,21 +78,23 @@ while True:
     try:
       decoded = json.loads(data)
 
-      # If the EOF flag is set, log and andd to buffer
+      # If the EOF flag is set, log and add to buffer
       if (decoded['eof']):
         buff[decoded['sequence']] = decoded
         log("[eof] " + str(decoded['sequence']) + " (" + str(len(decoded['data'])) + ")" )
 
-      # If there is data, we accept it and print it out
+      # If there is data, we accept it and add to buffer
       if (decoded['data']):
         buff[decoded['sequence']] = decoded
         log("[recv data] " + str(decoded['sequence']) + " (" + str(len(decoded['data'])) + ") ACCEPTED")
 
+      # if there is no entry in the ack tracking dictionaries, add them
       if not time_last_acked.get(decoded['sequence']):
         time_last_acked[decoded['sequence']] = 0
         ack_count[decoded['sequence']] = 0
 
-      # Send back an ack to the sender (NOT SACK)
+      # figure out which message to ack
+      # we want to ack the last message for which we have received all packets up to and including it
       sequence = 0
       preventry = None
       entry = {"sequence": 0, "data": "", "timestamp": decoded['timestamp'], "eof": False}
@@ -101,32 +109,33 @@ while True:
           break
         else:
           if entry['eof']:
-            eof = 1
             ackedmsg = entry
             break
           sequence += len(entry['data'])
 
+      # are we acking the eof? if so, we want to make sure we add one to the ack number
+      # so that we do can differentiate between eof ack and last data packet ack
       if ackedmsg['eof']:
         eof = 1 
 
-      # right here allow sending ack 5 times within window
+      # limit number of acks sent within a timeout window to 5 so we don't flood the network with identical acks
       timed_out = time.time() - time_last_acked[ackedmsg['sequence']] > decoded['timeout']
       if timed_out:
-        ack_count[ackedmsg['sequence']] = 0
-        time_last_acked[ackedmsg['sequence']] = time.time()
+        ack_count[ackedmsg['sequence']] = 0 # if we timed out, reset the ack count to 0
+        time_last_acked[ackedmsg['sequence']] = time.time() # and set the time last acked to now
 
+      # only sent the ack if we just timed out of the ack count is less than 5
       if timed_out or ack_count[ackedmsg['sequence']] < 5:
         ack_count[ackedmsg['sequence']] = ack_count[ackedmsg['sequence']] + 1
 
-        #  ack_count[ackedmsg['sequence']] = time_last_acked.get(ackedmsg['sequence']) ? ack_count[ackedmsg['sequence']] + 1 : 1
-        
+        # prepare the message and try to send
         msg = json.dumps({"ack": ackedmsg['sequence'] + len(ackedmsg['data']) + eof, 'timestamp':ackedmsg['timestamp']})
-        log("ABOUT TO SEND " + msg)
         if sock.sendto(msg, addr) < len(msg):
           log("[error] unable to fully send packet")
       else: 
         log("Not sending duplicate ack ("+str(ackedmsg['sequence'] + len(ackedmsg['data']) + eof) +")within timeout")
-      # make sure the sender gets this eof 
+      
+      # if we have received the eof, start the shutdown process 
       if eof:
         start_closing(buff)
 
