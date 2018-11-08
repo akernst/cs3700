@@ -1,7 +1,4 @@
 #!/usr/bin/python -u
-#
-# Project 2 Starter Code
-#
 
 import sys
 import socket
@@ -11,6 +8,10 @@ import select
 import json
 
 MSG_SIZE = 1500
+TIMEOUT = 30
+orderedACK = "ACCEPTED (in-order)"
+outOfOrderACK = "ACCEPTED (out-of-order)"
+IGNORED = "IGNORED"
 
 # print the entire message
 def printMessageInOrder(buff):
@@ -45,9 +46,6 @@ def start_closing(buff):
   printMessageInOrder(buff)
   sys.exit(0)
 
-
-TIMEOUT = 30
-
 # Bind to localhost and an ephemeral port
 UDP_IP = "127.0.0.1"
 UDP_PORT = 0
@@ -78,15 +76,11 @@ while True:
     try:
       decoded = json.loads(data)
 
-      # If the EOF flag is set, log and add to buffer
-      if (decoded['eof']):
-        buff[decoded['sequence']] = decoded
-        log("[eof] " + str(decoded['sequence']) + " (" + str(len(decoded['data'])) + ")" )
-
-      # If there is data, we accept it and add to buffer
-      if (decoded['data']):
-        buff[decoded['sequence']] = decoded
-        log("[recv data] " + str(decoded['sequence']) + " (" + str(len(decoded['data'])) + ") ACCEPTED")
+      # If the EOF flag is set, or if there is data, we accept it and add to buffer
+      if (decoded['eof'] or decoded['data']):
+        if buff.get(decoded['sequence']) is None:
+          buff[decoded['sequence']] = decoded
+        log("[recv data] " + str(decoded['sequence']) + " (" + str(len(decoded['data'])) + ") " + outOfOrderACK)
 
       # if there is no entry in the ack tracking dictionaries, add them
       if not time_last_acked.get(decoded['sequence']):
@@ -133,7 +127,7 @@ while True:
         if sock.sendto(msg, addr) < len(msg):
           log("[error] unable to fully send packet")
       else: 
-        log("Not sending duplicate ack ("+str(ackedmsg['sequence'] + len(ackedmsg['data']) + eof) +")within timeout")
+        log("Not sending duplicate ack ("+str(ackedmsg['sequence'] + len(ackedmsg['data']) + eof) +") within timeout")
       
       # if we have received the eof, start the shutdown process 
       if eof:

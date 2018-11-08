@@ -1,7 +1,4 @@
 #!/usr/bin/python -u
-#
-# Project 2 Starter Code
-#
 
 import sys
 import socket
@@ -102,6 +99,9 @@ while True:
       (data, addr) = sock.recvfrom(MSG_SIZE)
       try:
         decoded = json.loads(data)
+
+        # log the ACK to STDERR
+        log("[recv ack] " + str(decoded['ack']))
         
         # update RTT estimate and corresponding timeout value
         timeReceived = time.time()
@@ -112,6 +112,7 @@ while True:
         
         # if we got final ack, just quit gracefully
         if decoded['ack'] - 1 == buff[-1]['sequence']:
+          log("[completed]")
           sys.exit(0)
 
         # if ack is the same as last highest ack, do nothing
