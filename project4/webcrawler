@@ -2,15 +2,43 @@
 
 import sys
 import socket
+import json
 #import parseurl
 #import html
-#import html.parse
+#import html.parser
 #import xml
+
+def parseResponse(message):
+  d = {}
+  m = message.split('\n\n')
+  firstPart = m[0].split('\n')
+  nextPart = '\n\n'.join(m[1:])
+  
+  d["statusCode"] = firstPart[0].split(' ')[1]
+  d['headers'] = {}
+  for line in firstPart[1:]:
+    parts = line.split(': ')
+    d['headers'][parts[0]] = parts[1]
+
+  d['data'] = nextPart
+  print(json.dumps(d))
+  return d
 
 def login(sock):
   requestUrl = 'http://fring.ccs.neu.edu/accounts/login/?next=/fakebook/'
-  r = "GET /accounts/login/?next=/fakebook/ HTTP/1.1 \n" + "Host: fring.ccs.neu.edu"
+  r = "GET /accounts/login/?next=/fakebook/ HTTP/1.0 \n" + "Host: fring.ccs.neu.edu\n\n"
   sock.sendall(r)
+  rawMes = receiveMessage(sock)
+  mes = parseResponse(rawMes)
+  
+  switch(mes["statusCode"]):
+    case "200":
+      print("good 200")
+      break
+    default:
+      print('error')
+      print(rawMes)
+
 
 def receiveMessage(sock):
   mes = ''
@@ -28,7 +56,7 @@ def main():
   # Create a TCP/IP socket
   sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-  hostname = 'http://fring.ccs.neu.edu'
+  hostname = 'fring.ccs.neu.edu'
   port = 27993
 
   # get remote ip
@@ -41,8 +69,6 @@ def main():
 
   # print("# Connected")
   login(sock)
-  mes = receiveMessage(sock)
-  print(mes)
 
 
 if __name__ == "__main__":
