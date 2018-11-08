@@ -1,0 +1,49 @@
+#!/usr/bin/python -u
+
+import sys
+import socket
+#import parseurl
+#import html
+#import html.parse
+#import xml
+
+def login(sock):
+  requestUrl = 'http://fring.ccs.neu.edu/accounts/login/?next=/fakebook/'
+  r = "GET /accounts/login/?next=/fakebook/ HTTP/1.1 \n" + "Host: fring.ccs.neu.edu"
+  sock.sendall(r)
+
+def receiveMessage(sock):
+  mes = ''
+  while 1:
+    data = sock.recv(4096)
+    mes += data
+    # if last received character was a newline, we're done receiving the message
+    if data[-1] == '\n':
+      #print('# received message')
+      break
+  #print(mes)
+  return mes
+
+def main():
+  # Create a TCP/IP socket
+  sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+  hostname = 'http://fring.ccs.neu.edu'
+  port = 27993
+
+  # get remote ip
+  #remote_ip = socket.gethostbyname(hostname)
+  #print('# Connecting to server, ' + hostname + ' (' + remote_ip + ')')
+  
+  # set the socket timeout and connect
+  sock.settimeout(5)
+  sock.connect((hostname, port))
+
+  # print("# Connected")
+  login(sock)
+  mes = receiveMessage(sock)
+  print(mes)
+
+
+if __name__ == "__main__":
+  main()
