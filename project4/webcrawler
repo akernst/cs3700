@@ -8,15 +8,38 @@ import json
 #import html.parser
 #import xml
 
+from HTMLParser import HTMLParser
+
+csrfToken = ''
+
+class MyHTMLParser(HTMLParser):
+  def handle_starttag(self, tag, attrs):
+    print("Encountered a start tag:", tag)
+    attrDict = {}
+    for attr in attrs:
+      attrDict[attr[0]] = attr[1]
+    if attrDict.get("name", '') == 'csrfmiddlewaretoken':
+      csrftoken = attrDict['value']
+
+  def handle_endtag(self, tag): 
+    print("Encountered an end tag :", tag)
+
+  def handle_data(self, data):
+    print("Encountered some data  :", data)
+
+
+
 def parseResponse(message):
   d = {}
-  m = message.split('\n\n')
-  firstPart = m[0].split('\n')
-  nextPart = '\n\n'.join(m[1:])
+  m = message.split('\r\n\r\n')
+  firstPart = m[0].split('\r\n')
+  nextPart = '\r\n\r\n'.join(m[1:])
   
   d["statusCode"] = firstPart[0].split(' ')[1]
   d['headers'] = {}
+  print(firstPart[1:])
   for line in firstPart[1:]:
+    print(line)
     parts = line.split(': ')
     d['headers'][parts[0]] = parts[1]
 
@@ -31,14 +54,18 @@ def login(sock):
   rawMes = receiveMessage(sock)
   mes = parseResponse(rawMes)
   
-  switch(mes["statusCode"]):
-    case "200":
-      print("good 200")
-      break
-    default:
-      print('error')
-      print(rawMes)
+  if mes["statusCode"] == "200":
+    print("good 200")
+  else:
+    print('error')
+    print(rawMes)
+    return
+  
+  parser = MyHTMLParser()
+  parser.feed(mes['data'])
 
+  print("Token:")
+  print(csrfToken)
 
 def receiveMessage(sock):
   mes = ''
@@ -57,7 +84,7 @@ def main():
   sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
   hostname = 'fring.ccs.neu.edu'
-  port = 27993
+  port = 80
 
   # get remote ip
   #remote_ip = socket.gethostbyname(hostname)
