@@ -1,5 +1,6 @@
 #!/usr/bin/python -u
 
+import argparse
 import sys
 import socket
 import json
@@ -10,16 +11,18 @@ import json
 
 from HTMLParser import HTMLParser
 
-csrfToken = ''
+csrfToken = 'start token'
 
 class MyHTMLParser(HTMLParser):
   def handle_starttag(self, tag, attrs):
+    global csrfToken
+    print(csrfToken)
     print("Encountered a start tag:", tag)
     attrDict = {}
     for attr in attrs:
       attrDict[attr[0]] = attr[1]
     if attrDict.get("name", '') == 'csrfmiddlewaretoken':
-      csrftoken = attrDict['value']
+      csrfToken = attrDict['value']
 
   def handle_endtag(self, tag): 
     print("Encountered an end tag :", tag)
@@ -47,15 +50,18 @@ def parseResponse(message):
   print(json.dumps(d))
   return d
 
-def login(sock):
+def login(sock, username, password):
+  global csrfToken
+  print('Username:', username)
+  print('Password:', password)
   requestUrl = 'http://fring.ccs.neu.edu/accounts/login/?next=/fakebook/'
-  r = "GET /accounts/login/?next=/fakebook/ HTTP/1.0 \n" + "Host: fring.ccs.neu.edu\n\n"
+  r = 'GET /accounts/login/?next=/fakebook/ HTTP/1.0 \n' + 'Host: fring.ccs.neu.edu\n\n'
   sock.sendall(r)
   rawMes = receiveMessage(sock)
   mes = parseResponse(rawMes)
   
-  if mes["statusCode"] == "200":
-    print("good 200")
+  if mes['statusCode'] == '200':
+    print('good 200')
   else:
     print('error')
     print(rawMes)
@@ -67,12 +73,30 @@ def login(sock):
   print("Token:")
   print(csrfToken)
 
+  requestUrl = 'http://fring.ccs.neu.edu/accounts/login/'
+  requestBody = 'username=' + username + '&password=' + password + '&csrfmiddlewaretoken=' + csrfToken + '&next=%2Ffakebook%2F'
+  r = 'POST /accounts/login/ HTTP/1.0 \n' + 'Host: fring.ccs.neu.edu\n'
+  r = r + 'Referer: http://fring.ccs.neu.edu/accounts/login/?next=/fakebook/\n'
+  r = r + 'Content-Type: application/x-www-form-urlencoded\n'
+  r = r + 'Content-Length: ' + str(len(requestBody)) + '\n\n'
+  r = r + requestBody + '\n\n'
+  sock.sendall(r)
+  print(r)
+  try:
+    rawMes = receiveMessage(sock)
+  except:
+    rawMes = receiveMessage(sock)
+
+  print(rawMes)
+  mes = parseResponse(rawMes)
+
 def receiveMessage(sock):
   mes = ''
   while 1:
     data = sock.recv(4096)
     mes += data
     # if last received character was a newline, we're done receiving the message
+    print('DATA:', data)
     if data[-1] == '\n':
       #print('# received message')
       break
@@ -80,6 +104,15 @@ def receiveMessage(sock):
   return mes
 
 def main():
+  # Parse command line arguments
+  parser = argparse.ArgumentParser(description='Simple webcrawler')
+  parser.add_argument('user')
+  parser.add_argument('password')
+  args = parser.parse_args(sys.argv[1:]) # arguments exclude filename
+
+  username = args.user
+  password = args.password
+  
   # Create a TCP/IP socket
   sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
@@ -95,7 +128,7 @@ def main():
   sock.connect((hostname, port))
 
   # print("# Connected")
-  login(sock)
+  login(sock, username, password)
 
 
 if __name__ == "__main__":
