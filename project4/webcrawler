@@ -12,7 +12,7 @@ import json
 from HTMLParser import HTMLParser
 
 csrfToken = 'start token'
-
+sessionId = 'start session id'
 class MyHTMLParser(HTMLParser):
   def handle_starttag(self, tag, attrs):
     global csrfToken
@@ -31,7 +31,105 @@ class MyHTMLParser(HTMLParser):
     print("Encountered some data  :", data)
 
 
+def login(sock, username, password):
+  global csrfToken
+  global sessionId
+  print('Username:', username)
+  print('Password:', password)
+  requestUrl = 'http://fring.ccs.neu.edu/accounts/login/?next=/fakebook/'
+  r = 'GET /accounts/login/?next=/fakebook/ HTTP/1.0 \n' + 'Host: fring.ccs.neu.edu\n'
+  r = r + 'Connection: keep-alive\n\n'
+  sock.sendall(r)
+  mes = receiveMessage(sock)
+  
+  if mes['statusCode'] == '200':
+    print('good 200')
+  else:
+    print('error')
+    print(json.dumps(mes))
+    return
 
+  csrfToken = mes['cookies']['csrftoken']['value']
+  sessionId = mes['cookies']['sessionid']['value']
+  
+  '''
+  parser = MyHTMLParser()
+  parser.feed(mes['data'])
+  '''
+
+  print("Token:")
+  print(csrfToken)
+
+  requestUrl = 'http://fring.ccs.neu.edu/accounts/login/'
+  requestBody = 'username=' + username + '&password=' + password + '&csrfmiddlewaretoken=' + csrfToken + '&next=%2Ffakebook%2F'
+  r = 'POST /accounts/login/ HTTP/1.0 \n' + 'Host: fring.ccs.neu.edu\n'
+  r = r + 'Cookie: csrftoken=' + csrfToken + '; sessionid=' + sessionId + ';\n'
+  r = r + 'Referer: http://fring.ccs.neu.edu/accounts/login/?next=/fakebook/\n'
+  r = r + 'Content-Type: application/x-www-form-urlencoded\n'
+  r = r + 'Connection: keep-alive\n'
+  r = r + 'Content-Length: ' + str(len(requestBody)) + '\n\n'
+  r = r + requestBody + '\n\n'
+  sock.sendall(r)
+  print(r)
+  mes = receiveMessage(sock)
+  print(json.dumps(mes))
+
+def receiveMessage(sock):
+  fullbuff = ''
+  d = {}
+  mes_header = ''
+  mes_body = ''
+  body_bytes_received = 0
+  content_length = 0
+  while 1:
+    
+    bytes_to_receive = 4096
+    if content_length > 0 and content_length - body_bytes_received < 4096:
+      bytes_to_receive = content_length - body_bytes_received
+
+    databuff = sock.recv(bytes_to_receive)
+    fullbuff = fullbuff + databuff
+    print(fullbuff)
+    if content_length == 0:
+      end_header_index = databuff.find('\r\n\r\n')
+      if end_header_index == -1:
+        mes_header += databuff
+      else:
+        databuff_parts = databuff.split('\r\n\r\n')
+        mes_header += databuff_parts[0]
+        # parse headers
+        firstPart = mes_header.split('\r\n')
+        d["statusCode"] = firstPart[0].split(' ')[1]
+        d['headers'] = {}
+        d['cookies'] = {}
+        for line in firstPart[1:]:
+          parts = line.split(': ')
+          if parts[0] == 'Set-Cookie':
+            cookie_parts = parts[1].split('; ')
+            first_cookie_part = cookie_parts[0].split('=')
+            d['cookies'][first_cookie_part[0]] = {}
+            d['cookies'][first_cookie_part[0]]['value'] = first_cookie_part[1]
+            for cookie_part in cookie_parts[1:]:
+              split_part = cookie_part.split('=')
+              d['cookies'][first_cookie_part[0]][split_part[0]] = split_part[1]
+          else:
+            d['headers'][parts[0]] = parts[1]
+        content_length = int(d['headers']['Content-Length'])
+
+        mes_body = mes_body + databuff_parts[1]
+        body_bytes_received = body_bytes_received + len(databuff_parts[1])
+    else:
+      mes_body = mes_body + databuff
+      body_bytes_received = body_bytes_received + len(databuff)
+
+    # if last received character was a newline, we're done receiving the message
+    if body_bytes_received == content_length:
+      d['data'] = mes_body
+      #print('# received message')
+      break
+  return d
+
+'''
 def parseResponse(message):
   d = {}
   m = message.split('\r\n\r\n')
@@ -49,59 +147,7 @@ def parseResponse(message):
   d['data'] = nextPart
   print(json.dumps(d))
   return d
-
-def login(sock, username, password):
-  global csrfToken
-  print('Username:', username)
-  print('Password:', password)
-  requestUrl = 'http://fring.ccs.neu.edu/accounts/login/?next=/fakebook/'
-  r = 'GET /accounts/login/?next=/fakebook/ HTTP/1.0 \n' + 'Host: fring.ccs.neu.edu\n\n'
-  sock.sendall(r)
-  rawMes = receiveMessage(sock)
-  mes = parseResponse(rawMes)
-  
-  if mes['statusCode'] == '200':
-    print('good 200')
-  else:
-    print('error')
-    print(rawMes)
-    return
-  
-  parser = MyHTMLParser()
-  parser.feed(mes['data'])
-
-  print("Token:")
-  print(csrfToken)
-
-  requestUrl = 'http://fring.ccs.neu.edu/accounts/login/'
-  requestBody = 'username=' + username + '&password=' + password + '&csrfmiddlewaretoken=' + csrfToken + '&next=%2Ffakebook%2F'
-  r = 'POST /accounts/login/ HTTP/1.0 \n' + 'Host: fring.ccs.neu.edu\n'
-  r = r + 'Referer: http://fring.ccs.neu.edu/accounts/login/?next=/fakebook/\n'
-  r = r + 'Content-Type: application/x-www-form-urlencoded\n'
-  r = r + 'Content-Length: ' + str(len(requestBody)) + '\n\n'
-  r = r + requestBody + '\n\n'
-  sock.sendall(r)
-  print(r)
-  try:
-    rawMes = receiveMessage(sock)
-  except:
-    rawMes = receiveMessage(sock)
-
-  print(rawMes)
-  mes = parseResponse(rawMes)
-
-def receiveMessage(sock):
-  mes = ''
-  while 1:
-    data = sock.recv(4096)
-    mes += data
-    # if last received character was a newline, we're done receiving the message
-    print('DATA:', data)
-    if data[-1] == '\n':
-      #print('# received message')
-      break
-  #print(mes)
-  return mes
+'''
 
 def main():
   # Parse command line arguments
