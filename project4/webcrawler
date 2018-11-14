@@ -4,6 +4,7 @@ import argparse
 import sys
 import socket
 import json
+import time
 #import parseurl
 #import html
 #import html.parser
@@ -13,29 +14,47 @@ from HTMLParser import HTMLParser
 
 csrfToken = 'start token'
 sessionId = 'start session id'
-class MyHTMLParser(HTMLParser):
+frontier = []
+visited = set()
+
+DEBUG = False
+
+class CrawlParser(HTMLParser):
+  foundflag = False
+
   def handle_starttag(self, tag, attrs):
-    global csrfToken
-    print(csrfToken)
-    print("Encountered a start tag:", tag)
+    global frontier
+    global visited
     attrDict = {}
+    if tag != 'h2' and tag != 'a':
+      return
+
     for attr in attrs:
       attrDict[attr[0]] = attr[1]
-    if attrDict.get("name", '') == 'csrfmiddlewaretoken':
-      csrfToken = attrDict['value']
-
+    
+    if tag == 'h2' and attrDict.get('class') == 'secret_flag':
+      print('FOUND SECRET FLAG')
+      self.foundflag = True 
+    elif tag == 'a':
+      href = attrDict.get('href')
+      if href.startswith('/fakebook') and href not in visited:
+        frontier.append(attrDict.get('href'))
+  
   def handle_endtag(self, tag): 
-    print("Encountered an end tag :", tag)
+    return
 
   def handle_data(self, data):
-    print("Encountered some data  :", data)
+    if self.foundflag:
+      print(data)
+      self.foundflag = false
 
 
 def login(sock, username, password):
   global csrfToken
   global sessionId
-  print('Username:', username)
-  print('Password:', password)
+  if DEBUG:
+    print('Username:', username)
+    print('Password:', password)
   requestUrl = 'http://fring.ccs.neu.edu/accounts/login/?next=/fakebook/'
   r = 'GET /accounts/login/?next=/fakebook/ HTTP/1.0 \n' + 'Host: fring.ccs.neu.edu\n'
   r = r + 'Connection: keep-alive\n\n'
@@ -43,7 +62,8 @@ def login(sock, username, password):
   mes = receiveMessage(sock)
   
   if mes['statusCode'] == '200':
-    print('good 200')
+    if DEBUG:
+      print('good 200')
   else:
     print('error')
     print(json.dumps(mes))
@@ -52,13 +72,9 @@ def login(sock, username, password):
   csrfToken = mes['cookies']['csrftoken']['value']
   sessionId = mes['cookies']['sessionid']['value']
   
-  '''
-  parser = MyHTMLParser()
-  parser.feed(mes['data'])
-  '''
-
-  print("Token:")
-  print(csrfToken)
+  if DEBUG:
+    print("Token:")
+    print(csrfToken)
 
   requestUrl = 'http://fring.ccs.neu.edu/accounts/login/'
   requestBody = 'username=' + username + '&password=' + password + '&csrfmiddlewaretoken=' + csrfToken + '&next=%2Ffakebook%2F'
@@ -70,9 +86,22 @@ def login(sock, username, password):
   r = r + 'Content-Length: ' + str(len(requestBody)) + '\n\n'
   r = r + requestBody + '\n\n'
   sock.sendall(r)
-  print(r)
+  
+  if DEBUG:
+    print(r)
+  
   mes = receiveMessage(sock)
-  print(json.dumps(mes))
+  
+  if DEBUG:
+    print(json.dumps(mes))
+  
+  if mes.get('statusCode') != '200':
+    print('error loggin ing!')
+    print(json.dumps(mes, indent=2))
+  sessionId = mes['cookies']['sessionid']['value']
+  frontier.append('/fakebook/');
+  return  
+
 
 def receiveMessage(sock):
   fullbuff = ''
@@ -89,7 +118,10 @@ def receiveMessage(sock):
 
     databuff = sock.recv(bytes_to_receive)
     fullbuff = fullbuff + databuff
-    print(fullbuff)
+    
+    if DEBUG:
+      print(fullbuff)
+    
     if content_length == 0:
       end_header_index = databuff.find('\r\n\r\n')
       if end_header_index == -1:
@@ -114,10 +146,22 @@ def receiveMessage(sock):
               d['cookies'][first_cookie_part[0]][split_part[0]] = split_part[1]
           else:
             d['headers'][parts[0]] = parts[1]
-        content_length = int(d['headers']['Content-Length'])
-
+        
         mes_body = mes_body + databuff_parts[1]
         body_bytes_received = body_bytes_received + len(databuff_parts[1])
+    
+        if d['headers'].get('Content-Length'):
+          content_length = int(d['headers']['Content-Length'])
+        else:
+          print('no content length')
+          print(json.dumps(d, indent=2))
+          # if we weren't given content-length, read until no more data
+          while databuff:
+            databuff = sock.recv(4096)
+            mes_body = mes_body + databuff
+          d['data'] = mes_body
+          print(json.dumps(d, indent=2))
+          return d  
     else:
       mes_body = mes_body + databuff
       body_bytes_received = body_bytes_received + len(databuff)
@@ -129,25 +173,54 @@ def receiveMessage(sock):
       break
   return d
 
-'''
-def parseResponse(message):
-  d = {}
-  m = message.split('\r\n\r\n')
-  firstPart = m[0].split('\r\n')
-  nextPart = '\r\n\r\n'.join(m[1:])
-  
-  d["statusCode"] = firstPart[0].split(' ')[1]
-  d['headers'] = {}
-  print(firstPart[1:])
-  for line in firstPart[1:]:
-    print(line)
-    parts = line.split(': ')
-    d['headers'][parts[0]] = parts[1]
+def build_request(path, csrfToken, sessionId):
+  r =  ("GET {0} HTTP/1.0\n"
+        "Host: fring.ccs.neu.edu\n"
+        "Cookie: csrftoken={1}; sessionid={2};\n"
+        "Connection: keep-alive\n\n").format(path, csrfToken, sessionId)
+  return r 
 
-  d['data'] = nextPart
-  print(json.dumps(d))
-  return d
-'''
+def crawl(sock):
+  global frontier
+  global visited
+  global sessionId
+  global csrfToken
+  if DEBUG:
+    print('SESSION ID: ' + sessionId) 
+  
+  parser = CrawlParser()
+
+  while frontier:
+    if DEBUG:
+      print('Frontier')
+      print(json.dumps(frontier))
+      print('Visited')
+      print(visited)
+
+    next_link = frontier.pop()
+    print(next_link)
+    request = build_request(next_link, csrfToken, sessionId)
+    
+    if DEBUG:
+      print('REQUEST')
+      print(request)
+
+    sock.sendall(request)
+    visited.add(next_link)
+    response = receiveMessage(sock)
+    try:
+      if response['statusCode'] != '200':
+        print("Got a non-200 response")
+        print(json.dumps(response))
+        exit(-1)
+      else:
+        parser.feed(response['data'])
+        if response['cookies'].get('sessionid'):
+          sessionId = response['cookies']['sessionid']['value']
+    except KeyError:
+      print(json.dumps(response))
+      exit(-1)
+    time.sleep(0.5)    
 
 def main():
   # Parse command line arguments
@@ -176,6 +249,8 @@ def main():
   # print("# Connected")
   login(sock, username, password)
 
+  # crawl
+  crawl(sock)
 
 if __name__ == "__main__":
   main()
