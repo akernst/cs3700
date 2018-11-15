@@ -16,6 +16,9 @@ csrfToken = 'start token'
 sessionId = 'start session id'
 frontier = []
 visited = set()
+hostname = 'fring.ccs.neu.edu'
+port = 80
+flag_count = 0
 
 DEBUG = False
 
@@ -33,7 +36,6 @@ class CrawlParser(HTMLParser):
       attrDict[attr[0]] = attr[1]
     
     if tag == 'h2' and attrDict.get('class') == 'secret_flag':
-      print('FOUND SECRET FLAG')
       self.foundflag = True 
     elif tag == 'a':
       href = attrDict.get('href')
@@ -44,9 +46,13 @@ class CrawlParser(HTMLParser):
     return
 
   def handle_data(self, data):
+    global flag_count
     if self.foundflag:
       print(data)
-      self.foundflag = false
+      self.foundflag = False
+      flag_count = flag_count + 1
+      if flag_count == 5:
+        exit(0)
 
 
 def login(sock, username, password):
@@ -56,7 +62,7 @@ def login(sock, username, password):
     print('Username:', username)
     print('Password:', password)
   request_path = '/accounts/login/?next=/fakebook/'
-  r =  ('GET {0} HTTP/1.0\n'
+  r =  ('GET {0} HTTP/1.1\n'
         'Host: fring.ccs.neu.edu\n'
         'Connection: keep-alive\n\n').format(request_path)
   sock.sendall(r)
@@ -65,9 +71,6 @@ def login(sock, username, password):
   if mes['statusCode'] == '200':
     if DEBUG:
       print('good 200')
-  elif mes['statusCode'] == '302':
-    if DEBUG:
-      print('redirect 302')
   else:
     print('error')
     print(json.dumps(mes))
@@ -75,14 +78,14 @@ def login(sock, username, password):
 
   csrfToken = mes['cookies']['csrftoken']['value']
   sessionId = mes['cookies']['sessionid']['value']
-  
+ 
   if DEBUG:
     print("Token:")
     print(csrfToken)
 
   requestUrl = 'http://fring.ccs.neu.edu/accounts/login/'
   requestBody = 'username=' + username + '&password=' + password + '&csrfmiddlewaretoken=' + csrfToken + '&next=%2Ffakebook%2F'
-  r = 'POST /accounts/login/ HTTP/1.0 \n' + 'Host: fring.ccs.neu.edu\n'
+  r = 'POST /accounts/login/ HTTP/1.1 \n' + 'Host: fring.ccs.neu.edu\n'
   r = r + 'Cookie: csrftoken=' + csrfToken + '; sessionid=' + sessionId + ';\n'
   r = r + 'Referer: http://fring.ccs.neu.edu/accounts/login/?next=/fakebook/\n'
   r = r + 'Content-Type: application/x-www-form-urlencoded\n'
@@ -99,13 +102,92 @@ def login(sock, username, password):
   if DEBUG:
     print(json.dumps(mes))
   
-  if mes.get('statusCode') != '200':
+  if mes.get('statusCode') != '200' and mes.get('statusCode') != "302":
     print('error loggin ing!')
     print(json.dumps(mes, indent=2))
+    exit(1)
+
   sessionId = mes['cookies']['sessionid']['value']
   frontier.append('/fakebook/');
   return  
+"""
+read from socket until we see /r/n/r/n
+at this point parse the headers
+if ContentLength, read from buffer normally
+if Transfer-Encoding == chunked, 
+"""
+def extract_headers(mes_header, d):
+  # parse headers
+  firstPart = mes_header.split('\r\n')
+  d["statusCode"] = firstPart[0].split(' ')[1]
+  d['headers'] = {}
+  d['cookies'] = {}
+  for line in firstPart[1:]:
+    parts = line.split(': ')
+    if parts[0] == 'Set-Cookie':
+      cookie_parts = parts[1].split('; ')
+      first_cookie_part = cookie_parts[0].split('=')
+      d['cookies'][first_cookie_part[0]] = {}
+      d['cookies'][first_cookie_part[0]]['value'] = first_cookie_part[1]
+      for cookie_part in cookie_parts[1:]:
+        split_part = cookie_part.split('=')
+        d['cookies'][first_cookie_part[0]][split_part[0]] = split_part[1]
+    else:
+      d['headers'][parts[0]] = parts[1]
+  return 
+ 
+def read_content_length(sock, d, body_so_far):
+  mes_string = body_so_far
+  content_length = int(d['headers']['Content-Length'])
+  bytes_left = content_length - len(mes_string)
+  while bytes_left > 0:
+    bytes_to_read = min(bytes_left, 4096)
+    databuff = sock.recv(bytes_to_read)
+    mes_string = mes_string + databuff
+    bytes_left = bytes_left - len(databuff)
+  
+  d['data'] = mes_string
+  return d
+  
+def get_chunklen(buff):
+  buff = buff.lstrip()
+  split_buff = buff.split("\r\n")
+  return (int(split_buff[0], 16), "\r\n".join(split_buff[1:]))
 
+def read_chunked_encoding(sock, d, body_so_far):
+  if body_so_far == "":
+    body_so_far = sock.recv(4096)
+  body_string = ""
+  chunklen, body_so_far = get_chunklen(body_so_far) 
+  chunk_string = ""
+  while True:
+    if chunklen <= len(body_so_far):
+      chunk_string = chunk_string + body_so_far[0:chunklen]
+      body_so_far = body_so_far[chunklen:]
+      body_string = body_string + chunk_string
+      chunk_string = ""
+      # check if we habe more chunks or we're done
+      if body_so_far.lstrip() == "":
+        body_so_far = sock.recv(4096)
+      chunklen, body_so_far = get_chunklen(body_so_far) 
+      if chunklen == 0:
+        break
+    else:
+      chunk_string = chunk_string + body_so_far
+      chunklen = chunklen - len(body_so_far)
+      body_so_far = sock.recv(4096)
+  d['data'] = body_string
+  return d
+
+def read_until_empty(sock, d, body_so_far):
+  body_str = body_so_far          
+  read = sock.recv(4096)
+  while read:
+    body_str = body_str + read
+    read = sock.recv(4096)
+
+  d['data'] = body_str
+  return d
 
 def receiveMessage(sock):
   fullbuff = ''
@@ -114,63 +196,37 @@ def receiveMessage(sock):
   mes_body = ''
   body_bytes_received = 0
   content_length = 0
+  chunked = False
   while 1:
-    
-    bytes_to_receive = 4096
-    if content_length > 0 and content_length - body_bytes_received < 4096:
-      bytes_to_receive = content_length - body_bytes_received
-
-    databuff = sock.recv(bytes_to_receive)
+    databuff = sock.recv(4096)
     fullbuff = fullbuff + databuff
     
     if DEBUG:
       print(fullbuff)
     
-    if content_length == 0:
-      end_header_index = databuff.find('\r\n\r\n')
-      if end_header_index == -1:
-        mes_header += databuff
-      else:
-        databuff_parts = databuff.split('\r\n\r\n')
-        mes_header += databuff_parts[0]
-        # parse headers
-        firstPart = mes_header.split('\r\n')
-        d["statusCode"] = firstPart[0].split(' ')[1]
-        d['headers'] = {}
-        d['cookies'] = {}
-        for line in firstPart[1:]:
-          parts = line.split(': ')
-          if parts[0] == 'Set-Cookie':
-            cookie_parts = parts[1].split('; ')
-            first_cookie_part = cookie_parts[0].split('=')
-            d['cookies'][first_cookie_part[0]] = {}
-            d['cookies'][first_cookie_part[0]]['value'] = first_cookie_part[1]
-            for cookie_part in cookie_parts[1:]:
-              split_part = cookie_part.split('=')
-              d['cookies'][first_cookie_part[0]][split_part[0]] = split_part[1]
-          else:
-            d['headers'][parts[0]] = parts[1]
-        
-        mes_body = mes_body + databuff_parts[1]
-        body_bytes_received = body_bytes_received + len(databuff_parts[1])
-    
-        if d['headers'].get('Content-Length'):
-          content_length = int(d['headers']['Content-Length'])
-          if not content_length:
-            return d
-        else:
-          print('no content length')
-          print(json.dumps(d, indent=2))
-          # if we weren't given content-length, read until no more data
-          while databuff:
-            databuff = sock.recv(4096)
-            mes_body = mes_body + databuff
-          d['data'] = mes_body
-          print(json.dumps(d, indent=2))
-          return d  
+    end_header_index = databuff.find('\r\n\r\n')
+    if end_header_index == -1:
+      mes_header += databuff
     else:
-      mes_body = mes_body + databuff
-      body_bytes_received = body_bytes_received + len(databuff)
+      databuff_parts = databuff.split('\r\n\r\n')
+      mes_header += databuff_parts[0]
+
+      # parse header information into data structure
+      extract_headers(mes_header, d)
+      body_so_far = "" if len(databuff_parts) == 1 else databuff_parts[1]       
+
+      if d['headers'].get('Content-Length'):
+        return read_content_length(sock, d, body_so_far)
+      elif d['headers'].get('Transfer-Encoding') and d['headers']['Transfer-Encoding'] == 'chunked':
+        try:
+          return read_chunked_encoding(sock, d, body_so_far)
+        except ValueError as e:
+          print(e)
+          print(json.dumps(d))
+          print(body_so_far)
+      else:
+        return read_until_empty(sock, d, body_so_far)
+ 
 
     # if last received character was a newline, we're done receiving the message
     if body_bytes_received == content_length:
@@ -180,7 +236,7 @@ def receiveMessage(sock):
   return d
 
 def build_request(path, csrfToken, sessionId):
-  r =  ("GET {0} HTTP/1.0\n"
+  r =  ("GET {0} HTTP/1.1\n"
         "Host: fring.ccs.neu.edu\n"
         "Cookie: csrftoken={1}; sessionid={2};\n"
         "Connection: keep-alive\n\n").format(path, csrfToken, sessionId)
@@ -191,20 +247,21 @@ def crawl(sock):
   global visited
   global sessionId
   global csrfToken
+  global hostname
+  global port
   if DEBUG:
     print('SESSION ID: ' + sessionId) 
   
   parser = CrawlParser()
 
   while frontier:
-    if DEBUG:
-      print('Frontier')
-      print(json.dumps(frontier))
-      print('Visited')
-      print(visited)
+#    if DEBUG:
+#      print('Frontier')
+ #     print(json.dumps(frontier))
+  #    print('Visited')
+   #   print(visited)
 
     next_link = frontier.pop()
-    print(next_link)
     request = build_request(next_link, csrfToken, sessionId)
     
     if DEBUG:
@@ -213,26 +270,30 @@ def crawl(sock):
 
     sock.sendall(request)
     response = receiveMessage(sock)
-    try:
-      if response['statusCode'] == '200':
-        visited.add(next_link)
-        parser.feed(response['data'])
-        if response['cookies'].get('sessionid'):
-          sessionId = response['cookies']['sessionid']['value']
-      elif response['statusCode'] == '500':
-        frontier.append(next_link)
-      else:
-        print("Got a unhandled response")
-        print(json.dumps(response))
-        exit(-1)
- 
-
-    except KeyError as e:
-      print("got an error")
-      print(e)
+    if not response.get('statusCode'):
+      print("About to cause an error")
+      print(json.dumps(response, indent=2))
+    if response['statusCode'] == '200':
+      visited.add(next_link)
+      parser.feed(response['data'])
+      if response['cookies'].get('sessionid'):
+        sessionId = response['cookies']['sessionid']['value']
+    elif response['statusCode'] == '500':
+      frontier.append(next_link)
+      time.sleep(1)
+    elif response['statusCode'] == '403' or response['statusCode'] == '404':
+      visited.add(next_link)
+    else:
+      print("Got a unhandled response")
       print(json.dumps(response))
-      exit(-1)
-    time.sleep(0.5)    
+      exit(1)
+ 
+    if response['headers']['Connection'] == 'close':
+      sock.shutdown(socket.SHUT_RDWR)
+      sock.close()
+      sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+      sock.settimeout(5)
+      sock.connect((hostname,port))
 
 def main():
   # Parse command line arguments
