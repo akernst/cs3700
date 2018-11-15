@@ -5,10 +5,6 @@ import sys
 import socket
 import json
 import time
-#import parseurl
-#import html
-#import html.parser
-#import xml
 
 from HTMLParser import HTMLParser
 
@@ -58,9 +54,11 @@ class CrawlParser(HTMLParser):
 def login(sock, username, password):
   global csrfToken
   global sessionId
+
   if DEBUG:
     print('Username:', username)
     print('Password:', password)
+
   request_path = '/accounts/login/?next=/fakebook/'
   r =  ('GET {0} HTTP/1.1\n'
         'Host: fring.ccs.neu.edu\n'
@@ -72,9 +70,9 @@ def login(sock, username, password):
     if DEBUG:
       print('good 200')
   else:
-    print('error')
+    print('Error:')
     print(json.dumps(mes))
-    return
+    exit(1)
 
   csrfToken = mes['cookies']['csrftoken']['value']
   sessionId = mes['cookies']['sessionid']['value']
@@ -109,13 +107,8 @@ def login(sock, username, password):
 
   sessionId = mes['cookies']['sessionid']['value']
   frontier.append('/fakebook/');
-  return  
-"""
-read from socket until we see /r/n/r/n
-at this point parse the headers
-if ContentLength, read from buffer normally
-if Transfer-Encoding == chunked, 
-"""
+  return
+
 def extract_headers(mes_header, d):
   # parse headers
   firstPart = mes_header.split('\r\n')
@@ -160,6 +153,7 @@ def read_chunked_encoding(sock, d, body_so_far):
   body_string = ""
   chunklen, body_so_far = get_chunklen(body_so_far) 
   chunk_string = ""
+
   while True:
     if chunklen <= len(body_so_far):
       chunk_string = chunk_string + body_so_far[0:chunklen]
@@ -169,7 +163,7 @@ def read_chunked_encoding(sock, d, body_so_far):
       # check if we habe more chunks or we're done
       if body_so_far.lstrip() == "":
         body_so_far = sock.recv(4096)
-      chunklen, body_so_far = get_chunklen(body_so_far) 
+      chunklen, body_so_far = get_chunklen(body_so_far)
       if chunklen == 0:
         break
     else:
@@ -226,12 +220,10 @@ def receiveMessage(sock):
           print(body_so_far)
       else:
         return read_until_empty(sock, d, body_so_far)
- 
 
     # if last received character was a newline, we're done receiving the message
     if body_bytes_received == content_length:
       d['data'] = mes_body
-      #print('# received message')
       break
   return d
 
@@ -249,17 +241,13 @@ def crawl(sock):
   global csrfToken
   global hostname
   global port
+
   if DEBUG:
     print('SESSION ID: ' + sessionId) 
   
   parser = CrawlParser()
 
   while frontier:
-#    if DEBUG:
-#      print('Frontier')
- #     print(json.dumps(frontier))
-  #    print('Visited')
-   #   print(visited)
 
     next_link = frontier.pop()
     request = build_request(next_link, csrfToken, sessionId)
@@ -273,6 +261,7 @@ def crawl(sock):
     if not response.get('statusCode'):
       print("About to cause an error")
       print(json.dumps(response, indent=2))
+
     if response['statusCode'] == '200':
       visited.add(next_link)
       parser.feed(response['data'])
@@ -289,11 +278,16 @@ def crawl(sock):
       exit(1)
  
     if response['headers']['Connection'] == 'close':
-      sock.shutdown(socket.SHUT_RDWR)
-      sock.close()
-      sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-      sock.settimeout(5)
-      sock.connect((hostname,port))
+      while True:
+        try:
+          sock.shutdown(socket.SHUT_RDWR)
+          sock.close()
+          sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+          sock.settimeout(5)
+          sock.connect((hostname,port))   
+        except:
+          continue
+        break
 
 def main():
   # Parse command line arguments
@@ -311,15 +305,11 @@ def main():
   hostname = 'fring.ccs.neu.edu'
   port = 80
 
-  # get remote ip
-  #remote_ip = socket.gethostbyname(hostname)
-  #print('# Connecting to server, ' + hostname + ' (' + remote_ip + ')')
-  
   # set the socket timeout and connect
   sock.settimeout(5)
   sock.connect((hostname, port))
 
-  # print("# Connected")
+  # login
   login(sock, username, password)
 
   # crawl
