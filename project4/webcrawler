@@ -269,7 +269,9 @@ def crawl(sock):
         sessionId = response['cookies']['sessionid']['value']
     elif response['statusCode'] == '500':
       frontier.append(next_link)
-      time.sleep(1)
+    elif response['statusCode'] == '301':
+      print('Location:', response['Location'])
+      frontier.append(response['Location'])
     elif response['statusCode'] == '403' or response['statusCode'] == '404':
       visited.add(next_link)
     else:
