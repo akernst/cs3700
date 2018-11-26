@@ -43,18 +43,46 @@ matchIndex = []
 heartbeat_timeout = 0.1
 last_heartbeat = time.time()
 
+kvstore = {}
+
+DEBUG = False
+
 ######################################
 ######## function definitions ########
 ######################################
 
-def debug(msg):
-  print("Replica " + str(my_id) + " :: " + str(time.time()) + " :: " + msg)
+def debug(msg, **kwargs):
+  if DEBUG or kwargs.get('force'):
+    print("Replica " + str(my_id) + " :: " + str(time.time()) + " :: " + msg)
+
+def respond_leader_get_put(msg):
+  debug("Handling a get/put as the leader")
+  global leader, my_id, kvstore
+
+  response = {}
+  response['src'] = my_id
+  response['dst'] = msg['src']
+  response['leader'] = leader
+  response['type'] = 'ok'
+  response['MID'] = msg['MID']
+
+  if msg['type'] == 'get':
+    val = kvstore.get(msg['key'])
+    response['value'] = "" if val is None else val
+    return sock.send(json.dumps(response))
+  elif msg['type'] == 'put':
+    # naive not-really-consensus-implementation
+    kvstore[msg['key']] = msg['value']
+    return sock.send(json.dumps(response))
+    
 
 def respond_get_put(msg):
   debug("Responding to a get or a put")
   global is_leader, leader, sock
-  if is_leader or leader == 'FFFF':
+  if leader == 'FFFF':
     return respond_with_fail(msg)
+  if is_leader:
+    return respond_leader_get_put(msg)
   debug("Responding with redirect")
   response = {}
   response['src'] = my_id
