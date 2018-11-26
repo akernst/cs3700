@@ -3,24 +3,11 @@
 import sys, socket, select, time, json, random
 
 ######################################
-######## function definitions ########
-######################################
-
-# respond to the provided msg with a failure message
-def respond_with_fail(msg):
-  response = {}
-  response['src'] = my_id
-  response['dst'] = msg['src']
-  response['leader'] = msg['leader']
-  response['type'] = 'fail'
-  response['MID'] = msg['MID']
-  response_raw = json.dumps(response)
-  return sock.send(response_raw)
-
-
-######################################
 ######## pre-loop definitions ########
 ######################################
+
+# cluster size
+cluster_size = len(sys.argv) - 1
 
 # Your ID number
 my_id = sys.argv[1]
@@ -33,40 +20,219 @@ replica_ids = sys.argv[2:]
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
 sock.connect(my_id)
 
-last = 0
+last_leader_msg = time.time()
+is_leader = False
+election_timeout = random.uniform(0.3, 0.6)
+
+leader = 'FFFF'
+
+currentTerm = 0
+votedFor = None
+votesReceived = []
+is_holding_election = False
+
+log = []
+
+commitIndex = 0
+lastApplied = 0
+
+# leader state
+nextIndex = []
+matchIndex = []
+
+heartbeat_timeout = 0.1
+last_heartbeat = time.time()
+
+######################################
+######## function definitions ########
+######################################
+
+def debug(msg):
+  print("Replica " + str(my_id) + " :: " + str(time.time()) + " :: " + msg)
+
+def respond_get_put(msg):
+  debug("Responding to a get or a put")
+  global is_leader, leader, sock
+  if is_leader or leader == 'FFFF':
+    return respond_with_fail(msg)
+  debug("Responding with redirect")
+  response = {}
+  response['src'] = my_id
+  response['dst'] = msg['src']
+  response['leader'] = leader
+  response['type'] = 'redirect'
+  response['MID'] = msg['MID']
+  return sock.send(json.dumps(response))
+
+# respond to the provided msg with a failure message
+def respond_with_fail(msg):
+  debug("Responding with fail")
+  response = {}
+  response['src'] = my_id
+  response['dst'] = msg['src']
+  response['leader'] = msg['leader']
+  response['type'] = 'fail'
+  response['MID'] = msg['MID']
+  response_raw = json.dumps(response)
+  return sock.send(response_raw)
+
+# handle append entries
+def handle_append_entries(msg):
+  debug("Handling append entries")
+  global currentTerm, leader, last_leader_msg
+  
+  last_leader_msg = time.time()
+  
+  res = {}
+  res['src'] = my_id
+  res['dst'] = msg['src']
+  res['type'] = 'appent_res'
+  # only handle heartbeats for now
+  if len(msg['entries']) == 0:
+    ## do something
+    if msg['term'] < currentTerm:
+      res['leader'] = leader
+      res['term'] = currentTerm
+      res['success'] = False
+      return sock.send(json.dumps(res))
+    else:
+      leader = msg['leader']
+      currentTerm = msg['term']
+      res['term'] = currentTerm
+      res['success'] = True
+      res['leader'] = leader
+      election_timeout = random.uniform(0.3, 0.6)
+      return sock.send(json.dumps(res))
+    
+  else:
+    print("Can't handle appents that aren't heartbeats")
+
+
+# request a vote
+def request_vote(rid):
+  debug("Requesting vote from" + str(rid))
+  req = {}
+  req['src'] = my_id
+  req['dst'] = rid
+  req['type'] = 'reqvot'
+  req['leader'] = 'FFFF'
+  req['term'] = currentTerm
+  req['candidateId'] = my_id
+  req['lastLogIndex'] = len(log) - 1
+  req['lastLogTerm'] = 0
+  req_raw = json.dumps(req)
+  sock.send(req_raw)
+
+# begin election
+def begin_election():
+  debug("Beginning election")
+  global currentTerm, votedFor, votesReceived, is_holding_election, last_leader_msg
+  currentTerm = currentTerm + 1
+  votedFor = my_id
+  votesReceived = [my_id]
+  is_holding_election = True
+  last_leader_msg = time.time() 
+  for rid in replica_ids:
+    request_vote(rid)
+
+# handle request vote
+def handle_request_vote(msg):
+  debug("Received request for vote from " + str(msg['src'])) 
+  global votedFor, currentTerm, last_leader_msg
+  res = {}
+  res['src'] = my_id
+  res['dst'] = msg['src']
+  res['type'] = 'reqvot_res'
+  res['leader'] = 'FFFF'
+  res['term'] = currentTerm
+  if msg['term'] < currentTerm:
+    res['voteGranted'] = False
+  elif votedFor in [None, msg['candidateId']]:
+    # initial election case
+    if len(log) == 0 and msg['lastLogIndex'] == -1:
+      res['voteGranted'] = True
+      votedFor = msg['src']
+      currentTerm = msg['term'] # ???
+    else:
+      res['voteGranted'] = False
+      print("Can't handle an election other than the first")
+  else:
+    res['voteGranted'] = False
+
+  last_leader_msg = time.time()
+  return sock.send(json.dumps(res))
+
+def send_heartbeat():
+  debug("Sending heartbeat")
+  global my_id, leader, currentTerm, replica_ids, sock, last_heartbeat
+  htbt = {}
+  htbt['src'] = my_id
+  htbt['leader'] = leader
+  htbt['type'] = 'appent'
+  htbt['entries'] = []
+  htbt['term'] = currentTerm
+  for rid in replica_ids:
+    htbt['dst'] = rid
+    sock.send(json.dumps(htbt))
+  last_heartbeat = time.time()
+  return
+
+def handle_vote_received(msg):
+  debug('Received vote from ' + str(msg['src']))
+  global leader, is_leader, votesReceived, is_holding_election
+  if not is_holding_election or not msg['voteGranted']:
+    return
+  votesReceived.append(msg['src'])
+  if len(votesReceived) > (cluster_size / 2):
+    debug("I've won the election")
+    # we won the election! 
+    # send a heartbeat 
+    leader = my_id
+    is_leader = True
+    votesReceived = []
+    is_holding_election = False
+    send_heartbeat() 
 
 
 ######################################
 ############## event loop ############
 ######################################
 
+debug("Election Timeout " + str(election_timeout))
+
 while True:
-  ready = select.select([sock], [], [], 0.1)[0]
-	
+
+  if is_leader and time.time() - last_heartbeat > heartbeat_timeout:
+    send_heartbeat()	
+  
+  ready = select.select([sock], [], [], 0.01)[0]
+  
   if sock in ready:
     msg_raw = sock.recv(32768)
-		
+	
     if len(msg_raw) == 0: continue
 
     msg = json.loads(msg_raw)
 
     if msg['dst'] not in my_id: 
-      print('Message not for me')
+      debug('Message not for me')
       continue
 	  
     if msg['type'] in ['get', 'put']:
-      respond_with_fail(msg)
-    # Handle noop messages. This may be removed from your final implementation
-    elif msg['type'] == 'noop':
-      print '%s received a NOOP from %s' % (msg['dst'], msg['src'])
+      respond_get_put(msg)
+    elif msg['type'] == 'appent':
+      handle_append_entries(msg)
+      last_leader_msg = time.time()
+    elif msg['type'] == 'reqvot':
+      handle_request_vote(msg)
+    elif msg['type'] == 'reqvot_res':
+      handle_vote_received(msg)
+      
 		
   clock = time.time()
-  if clock-last > 2:
-    # Send a no-op message to a random peer every two seconds, just for fun
-    # You definitely want to remove this from your implementation
-    msg = {'src': my_id, 'dst': random.choice(replica_ids), 'leader': 'FFFF', 'type': 'noop'}
-    sock.send(json.dumps(msg))
-    print '%s sending a NOOP to %s' % (msg['src'], msg['dst'])
+  # if election timeout has occurred
+  if not is_leader and (clock - last_leader_msg) > election_timeout:
+    begin_election()
     last = clock
 
 
