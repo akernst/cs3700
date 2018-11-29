@@ -27,7 +27,7 @@ election_timeout = random.uniform(0.3, 0.6)
 leader = 'FFFF'
 
 currentTerm = 0
-votedFor = None
+votedFor = {}
 votesReceived = []
 is_holding_election = False
 
@@ -172,27 +172,25 @@ def handle_request_vote(msg):
   res['dst'] = msg['src']
   res['type'] = 'reqvot_res'
   res['leader'] = 'FFFF'
-  res['term'] = currentTerm
   if msg['term'] < currentTerm:
     res['voteGranted'] = False
-  elif votedFor in [None, msg['candidateId']]:
-    # initial election case
-    if len(log) == 0 and msg['lastLogIndex'] == -1:
+  elif votedFor.get(currentTerm, None) in [None, msg['candidateId']]:
+    #  initial election case  | every other election  TODO: check log matching
+    if ((currentTerm == 0) or (msg['term'] >= currentTerm)): 
       res['voteGranted'] = True
-      votedFor = msg['src']
-      currentTerm = msg['term'] # ???
+      votedFor[currentTerm] = msg['src']
     else:
       res['voteGranted'] = False
-      print("Can't handle an election other than the first")
   else:
     res['voteGranted'] = False
 
+  res['term'] = currentTerm
   last_leader_msg = time.time()
   return sock.send(json.dumps(res))
 
 def send_heartbeat():
   debug("Sending heartbeat")
-  global my_id, leader, currentTerm, replica_ids, sock, last_heartbeat
+  global my_id, leader, currentTerm, replica_ids, sock, last_heartbeat, votedFor
   htbt = {}
   htbt['src'] = my_id
   htbt['leader'] = leader
