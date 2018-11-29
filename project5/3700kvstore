@@ -33,12 +33,12 @@ is_holding_election = False
 
 log = []
 
-commitIndex = 0
-lastApplied = 0
+commitIndex = -1
+lastApplied = -1
 
 # leader state
-nextIndex = []
-matchIndex = []
+nextIndex = {}
+matchIndex = {}
 
 heartbeat_timeout = 0.1
 last_heartbeat = time.time()
@@ -46,6 +46,8 @@ last_heartbeat = time.time()
 kvstore = {}
 
 DEBUG = False
+
+received_buffer = []
 
 ######################################
 ######## function definitions ########
@@ -57,22 +59,44 @@ def debug(msg, **kwargs):
 
 def send_to_replicas(key, val):
   debug("Sending appent to replicas")
-  global my_id, leader, currentTerm, replica_ids, sock, last_heartbeat, votedFor
+  global my_id, sock, received_buffer, leader, currentTerm, replica_ids, sock, last_heartbeat, votedFor
   htbt = {}
   htbt['src'] = my_id
   htbt['leader'] = leader
   htbt['type'] = 'appent'
-  htbt['entries'] = [{"key": key, "value": val}]
+  htbt['entries'] = [{"key": key, "value": val, "term": currentTerm}]
   htbt['term'] = currentTerm
   for rid in replica_ids:
     htbt['dst'] = rid
     sock.send(json.dumps(htbt))
     # naive.... also need ot check quorum achievement
  
+  timeout = .01
+  
+  oks = {my_id}
+  debug("Entering wait for quorum achievement", force=True)
+  while True: 
+    ready = select.select([sock], [], [], timeout)[0]
+    if sock in ready:
+      msg_raw = sock.recv(32768)
+      if len(msg_raw) == 0: continue
+      msg = json.loads(msg_raw)
+      if msg['type'] != 'appent_res':
+        received_buffer.append(msg)
+        continue
+      debug("Received response", force=True)
+      oks.add(msg['src'])
+      nextIndex[msg['src']] = len(log)
+      matchIndex[msg['src']] = len(log)
+      if len(oks) > (cluster_size / 2):
+        # yee haw
+        return True
+        
+    
 
 def respond_leader_get_put(msg):
   debug("Handling a get/put as the leader")
-  global leader, my_id, kvstore
+  global leader, my_id, kvstore, currentTerm
 
   response = {}
   response['src'] = my_id
@@ -87,10 +111,10 @@ def respond_leader_get_put(msg):
     return sock.send(json.dumps(response))
   elif msg['type'] == 'put':
     # naive not-really-consensus-implementation
-    kvstore[msg['key']] = msg['value']
-    log.append({'key': msg['key'], 'value': msg['value']})
-    send_to_replicas(msg['key'], msg['value'])
-    return sock.send(json.dumps(response))
+    log.append({'key': msg['key'], 'value': msg['value'], 'term': currentTerm})
+    if send_to_replicas(msg['key'], msg['value']):
+      kvstore[msg['key']] = msg['value']
+      return sock.send(json.dumps(response))
     
 
 def respond_get_put(msg):
@@ -141,7 +165,7 @@ def handle_append_entries(msg):
   else:
     for entry in msg['entries']:
       kvstore[entry['key']] = entry['value']
-      log.append({'key': entry['key'], 'value': entry['value']})
+      log.append(entry)
     leader = msg['leader']
     currentTerm = msg['term']
     res['term'] = currentTerm
@@ -168,7 +192,7 @@ def request_vote(rid):
 
 # begin election
 def begin_election():
-  debug("Beginning election")
+  debug("Beginning election", force=True)
   global currentTerm, votedFor, votesReceived, is_holding_election, last_leader_msg
   currentTerm = currentTerm + 1
   votedFor = my_id
@@ -232,6 +256,9 @@ def handle_vote_received(msg):
     is_leader = True
     votesReceived = []
     is_holding_election = False
+    for rid in replica_ids:
+      nextIndex[rid] = len(log)
+      matchIndex[rid] = -1
     send_heartbeat() 
 
 
@@ -245,17 +272,21 @@ while True:
 
   if is_leader and time.time() - last_heartbeat > heartbeat_timeout:
     send_heartbeat()	
-  
-  ready = select.select([sock], [], [], 0.01)[0]
-  
-  if sock in ready:
-    msg_raw = sock.recv(32768)
-	
-    if len(msg_raw) == 0: continue
 
-    msg = json.loads(msg_raw)
+  msg = None
+  if len(received_buffer) != 0:
+    msg = received_buffer.pop(0)
+  else:
+    ready = select.select([sock], [], [], 0.01)[0]
+  
+    if sock in ready:
+      msg_raw = sock.recv(32768)
+      if len(msg_raw) == 0: continue
 
-    if msg['dst'] not in my_id: 
+      msg = json.loads(msg_raw)
+  
+  if msg is not None:
+    if msg['dst'] != str(my_id): 
       debug('Message not for me')
       continue
 	  
@@ -264,6 +295,8 @@ while True:
     elif msg['type'] == 'appent':
       handle_append_entries(msg)
       last_leader_msg = time.time()
+#    elif msg['type'] == 'appent_res':
+#      handle_appent_res(msg)
     elif msg['type'] == 'reqvot':
       handle_request_vote(msg)
     elif msg['type'] == 'reqvot_res':
