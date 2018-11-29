@@ -55,6 +55,21 @@ def debug(msg, **kwargs):
   if DEBUG or kwargs.get('force'):
     print("Replica " + str(my_id) + " :: " + str(time.time()) + " :: " + msg)
 
+def send_to_replicas(key, val):
+  debug("Sending appent to replicas")
+  global my_id, leader, currentTerm, replica_ids, sock, last_heartbeat, votedFor
+  htbt = {}
+  htbt['src'] = my_id
+  htbt['leader'] = leader
+  htbt['type'] = 'appent'
+  htbt['entries'] = [{"key": key, "value": val}]
+  htbt['term'] = currentTerm
+  for rid in replica_ids:
+    htbt['dst'] = rid
+    sock.send(json.dumps(htbt))
+    # naive.... also need ot check quorum achievement
+ 
+
 def respond_leader_get_put(msg):
   debug("Handling a get/put as the leader")
   global leader, my_id, kvstore
@@ -73,6 +88,8 @@ def respond_leader_get_put(msg):
   elif msg['type'] == 'put':
     # naive not-really-consensus-implementation
     kvstore[msg['key']] = msg['value']
+    log.append({'key': msg['key'], 'value': msg['value']})
+    send_to_replicas(msg['key'], msg['value'])
     return sock.send(json.dumps(response))
     
 
@@ -115,25 +132,23 @@ def handle_append_entries(msg):
   res['src'] = my_id
   res['dst'] = msg['src']
   res['type'] = 'appent_res'
-  # only handle heartbeats for now
-  if len(msg['entries']) == 0:
-    ## do something
-    if msg['term'] < currentTerm:
-      res['leader'] = leader
-      res['term'] = currentTerm
-      res['success'] = False
-      return sock.send(json.dumps(res))
-    else:
-      leader = msg['leader']
-      currentTerm = msg['term']
-      res['term'] = currentTerm
-      res['success'] = True
-      res['leader'] = leader
-      election_timeout = random.uniform(0.3, 0.6)
-      return sock.send(json.dumps(res))
-    
+  ## do something
+  if msg['term'] < currentTerm:
+    res['leader'] = leader
+    res['term'] = currentTerm
+    res['success'] = False
+    return sock.send(json.dumps(res))
   else:
-    print("Can't handle appents that aren't heartbeats")
+    for entry in msg['entries']:
+      kvstore[entry['key']] = entry['value']
+      log.append({'key': entry['key'], 'value': entry['value']})
+    leader = msg['leader']
+    currentTerm = msg['term']
+    res['term'] = currentTerm
+    res['success'] = True
+    res['leader'] = leader
+    election_timeout = random.uniform(0.3, 0.6)
+    return sock.send(json.dumps(res))
 
 
 # request a vote
