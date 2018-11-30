@@ -1,0 +1,40 @@
+idea: only do sending and receiving within the IO loop (one source, easier to reason about)
+
+sock
+buffer
+appent buffer
+blocking appent buffer
+
+
+handle_put:
+  simply add the 4 appents to the blocking appent buffer, io loop will handle rest
+
+WHILE TRUE:
+
+  if blocking appent buffer is not empty
+    if timeout on blocking appent buffer responses:
+      resend contents of blocking appent buffer  
+    read from socket
+    if message is an appent response:
+      if read message is a response to one of the blocking appents:
+        remove from blocking appent buffer
+        if we've achieved quorum:
+          update appent buffer with contents of blocking appent buffer
+          empty blocking appent buffer
+          send response to client
+          reset blocking appent to 0
+        else continue loop
+      else: 
+        update contents of blocking appent buffer and appent buffer (new information but not enough for quorum case)
+    else:
+      if empty continue loop
+      else add to buffer
+
+  for appent in appent buffer:
+    if this appent has timed out:
+      resend appent (appent may be nothing AKA heartbeat)
+
+  if buffer is not empty: read message from buffer
+  else: read message from socket
+
+  handle message normally
