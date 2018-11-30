@@ -15,6 +15,14 @@ my_id = sys.argv[1]
 # The ID numbers of all the other replicas
 replica_ids = sys.argv[2:]
 
+# get pretty colors for printing
+colors = []
+for i in range(256):
+  colors.append(u"\u001b[38;5;" + str(i) + "m")
+sorted_ids = sorted(sys.argv[1:])
+my_color = colors[(1 + sorted_ids.index(my_id)) % 256]
+
+
 # Connect to the network. All messages to/from other replicas and clients will
 # occur over this socket
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
@@ -55,7 +63,7 @@ received_buffer = []
 
 def debug(msg, **kwargs):
   if DEBUG or kwargs.get('force'):
-    print("Replica " + str(my_id) + " :: " + str(time.time()) + " :: " + msg)
+    print(my_color + "Replica " + str(my_id) + " :: " + str(time.time()) + " :: " + msg + '\033[0m')
 
 def build_appent(entries, dst, prevLogIndex, prevLogTerm):
   global my_id, sock, received_buffer, leader, currentTerm, replica_ids, sock, last_heartbeat, votedFor
@@ -79,34 +87,44 @@ def send_to_replicas(key, val):
   prevLogIndex = len(log) - 2
   prevLogTerm = 0 if len(log) < 2 else log[prevLogIndex]['term']
   entries = [{'key': key, 'value': val, 'term': currentTerm}]
+  
+  appents = dict()
   for rid in replica_ids:
-    appent = build_appent(entries, rid, prevLogIndex, prevLogTerm)
-    sock.send(json.dumps(appent))
+    appents[rid] = json.dumps(build_appent(entries, rid, prevLogIndex, prevLogTerm))
     # naive.... also need ot check quorum achievement
  
-  timeout = .01
-  
+  timeout = .3
+  last_event = time.time()
   oks = {my_id}
   debug("Entering wait for quorum achievement")
-  while True: 
-    ready = select.select([sock], [], [], timeout)[0]
-    if sock in ready:
-      msg_raw = sock.recv(32768)
-      if len(msg_raw) == 0: continue
-      msg = json.loads(msg_raw)
-      if msg['type'] != 'appent_res':
-        received_buffer.append(msg)
-        continue
-      debug("Received response")
-      oks.add(msg['src'])
-      nextIndex[msg['src']] = msg['commitIndex'] + 1
-      matchIndex[msg['src']] = msg['lastApplied']
+  while True:   
+    for appent in appents.itervalues():
+      sock.send(appent)
+    last_event = time.time()
+
+    while True: 
+      if time.time() - last_event > timeout: break # resend stuff we gotta get quorum!!!
+      ready = select.select([sock], [], [], .01)[0]
+      if sock in ready:
+        msg_raw = sock.recv(32768)
+        if len(msg_raw) == 0: continue
+        msg = json.loads(msg_raw)
+        if msg['type'] != 'appent_res':
+          received_buffer.append(msg)
+          continue
+        last_event = time.time()
+        debug("Received response")
+        appents.pop(msg['src'])
+        oks.add(msg['src'])
+        nextIndex[msg['src']] = msg['commitIndex'] + 1
+        matchIndex[msg['src']] = msg['lastApplied']
       
-      if len(oks) > (cluster_size / 2):
-        # yee haw
-        lastApplied = len(log) - 1
-        return True
-        
+        if len(oks) > (cluster_size / 2):
+          # yee haw
+          lastApplied = len(log) - 1
+          return True
+    
+          
     
 
 def respond_leader_get_put(msg):
