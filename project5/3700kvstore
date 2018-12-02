@@ -32,7 +32,7 @@ last_leader_msg = time.time()
 is_leader = False
 
 def et():
-  return random.uniform(0.2, 0.4)
+  return random.uniform(0.2, 0.5)
 
 election_timeout = et()
 
@@ -75,7 +75,8 @@ for rid in replica_ids:
 init_time = time.time()
 
 def debug(msg, **kwargs):
-  if DEBUG or kwargs.get('force'):
+  if DEBUG :
+#or kwargs.get("force") :
     clock = time.time()
     print(my_color + "Replica " + str(my_id) + " :: " + str(clock) + " (" + str(clock-init_time) + ") :: " + msg + '\033[0m')
 
@@ -107,7 +108,7 @@ def send_to_replicas(key, val):
   for rid in replica_ids:
     entries = get_entries(rid)
     prevLogIndex = nextIndex[rid] - 1
-    prevLogTerm = 0 if prevLogIndex >= len(log) or prevLogIndex is -1 else log[prevLogIndex]['term']
+    prevLogTerm = 0 if (prevLogIndex >= len(log) or prevLogIndex == -1) else log[prevLogIndex]['term']
     appents[rid] = json.dumps(build_appent(entries, rid, prevLogIndex, prevLogTerm))
  
   timeout = .3
@@ -150,12 +151,12 @@ def send_to_replicas(key, val):
             rid = msg['src'] 
             entries = log[nextIndex[rid]:] 
             prevLogIndex = nextIndex[rid] - 1
-            prevLogTerm = 0 if prevLogIndex is -1 else log[prevLogIndex]['term']
+            prevLogTerm = 0 if prevLogIndex == -1 else log[prevLogIndex]['term']
             appents[rid] = json.dumps(build_appent(entries, rid, prevLogIndex, prevLogTerm))
     
 count = 0
 def respond_leader_get_put(msg):
-  debug("Handling a get/put as the leader")
+  debug("Handling a get/put as the leader", force=True)
   global count, leader, my_id, kvstore, currentTerm, commitIndex
 
   response = {}
@@ -281,14 +282,16 @@ def request_vote(rid):
 
 # begin election
 def begin_election():
-  debug("Beginning election", force=True)
-  global currentTerm, votedFor, votesReceived, is_holding_election, last_leader_msg, election_timeout
+  global leader, currentTerm, votedFor, votesReceived, is_holding_election, last_leader_msg, election_timeout
+  
   currentTerm = currentTerm + 1
+  debug("Beginning election " + str(currentTerm), force=True)
   election_timeout = et()
   votedFor[currentTerm] = my_id
   votesReceived = [my_id]
   is_holding_election = True
   last_leader_msg = time.time() 
+  leader = 'FFFF'
   for rid in replica_ids:
     request_vote(rid)
 
@@ -299,34 +302,29 @@ def is_up_to_date(cand_msg):
 
 # handle request vote
 def handle_request_vote(msg):
-  debug("Received request for vote from " + str(msg['src']), force=True) 
-  global votedFor, currentTerm, last_leader_msg, election_timeout
-  debug('LA: ' + str(lastApplied), force=True)
-  debug('CI: ' + str(commitIndex), force=True)
+  debug("Received request for vote from " + str(msg['src'])) 
+  global votedFor, leader, currentTerm, last_leader_msg, election_timeout
   res = {}
   res['src'] = my_id
   res['dst'] = msg['src']
   res['type'] = 'reqvot_res'
-  res['leader'] = 'FFFF'
   if msg['term'] < currentTerm:
     res['voteGranted'] = False
   elif votedFor.get(currentTerm, None) in [None, msg['candidateId']] and is_up_to_date(msg):
     election_timeout = et()
-    #  initial election case  | every other election  TODO: check log matching
-    if ((currentTerm == 0) or (msg['term'] >= currentTerm)): 
-      res['voteGranted'] = True
-      votedFor[currentTerm] = msg['src']
-    else:
-      res['voteGranted'] = False
+    res['voteGranted'] = True
+    votedFor[currentTerm] = msg['src']
+    leader = 'FFFF'
   else:
     res['voteGranted'] = False
 
+  res['leader'] = leader
   res['term'] = currentTerm
   last_leader_msg = time.time()
   return sock.send(json.dumps(res))
 
 def send_heartbeat():
-  debug("Sending heartbeat")
+  debug("Sending heartbeat", force=True)
   global my_id, leader, currentTerm, replica_ids, sock, last_heartbeat, votedFor
   htbt = {}
   htbt['src'] = my_id
@@ -342,13 +340,11 @@ def send_heartbeat():
   return
 
 def handle_vote_received(msg):
-  debug('Received vote from ' + str(msg['src']))
-  global leader, is_leader, my_id, votesReceived, is_holding_election
+  global leader, is_leader, my_id, votesReceived, is_holding_election, replica_ids
   if not is_holding_election or not msg['voteGranted']:
     return
-  votesReceived.append(msg['src'])
-  if len(votesReceived) > (cluster_size / 2):
-    debug("I've won the election", force=True)
+  else:
+    debug("I've won the election "+str(currentTerm), force=True)
     # we won the election! 
     # send a heartbeat 
     leader = my_id
@@ -364,7 +360,6 @@ def retry_appents():
   global replica_ids, nextIndex, matchIndex, log, commitIndex, sock, timeouts
   for rid in replica_ids:
     if time.time() - timeouts[rid]['last'] < timeouts[rid]['to']: continue
-    debug('here')
     # for each replica, send what we think they don't have
     # what we think they don't have is everything past lastIndex[rid] inclusive
     if nextIndex[rid] >= commitIndex or nextIndex[rid] >= len(log): continue
@@ -372,7 +367,6 @@ def retry_appents():
     
     appent = build_appent(entries_to_send, rid, nextIndex[rid] - 1, 0 if nextIndex[rid] == 0 else log[nextIndex[rid]]['term'])
     appent_raw = json.dumps(appent)
-
     sock.send(appent_raw)
     timeouts[rid]['last'] = time.time()
  
@@ -414,8 +408,7 @@ while True:
 
   msg = None
   if leader != 'FFFF' and len(received_buffer) != 0:
-    debug(json.dumps(received_buffer))
-    debug(str(leader))
+    debug(json.dumps(received_buffer), force=True)
     msg = received_buffer.pop(0)
   else:
     msg = receive_message(sock)
@@ -425,15 +418,27 @@ while True:
 
   if msg['type'] in ['get', 'put']:
     respond_get_put(msg)
-  elif msg['type'] == 'appent':
-    handle_append_entries(msg)
-    last_leader_msg = time.time()
-  elif msg['type'] == 'appent_res':
-    handle_appent_res(msg)
-  elif msg['type'] == 'reqvot':
-    handle_request_vote(msg)
-  elif msg['type'] == 'reqvot_res':
-    handle_vote_received(msg)
+  else:
+    if msg['term'] > currentTerm:
+      if is_leader:
+        debug("I'm handing over the keys to the kingdom", force=True)
+        debug(json.dumps(received_buffer), force=True)
+
+      is_leader = False
+      currentTerm = msg['term']
+      leader = msg['leader']
+      is_holding_election = False
+      votesReceived = [] 
+ 
+    if msg['type'] == 'appent':
+      handle_append_entries(msg)
+      last_leader_msg = time.time()
+    elif msg['type'] == 'appent_res':
+      handle_appent_res(msg)
+    elif msg['type'] == 'reqvot':
+      handle_request_vote(msg)
+    elif msg['type'] == 'reqvot_res':
+      handle_vote_received(msg)
       
 		
   clock = time.time()
