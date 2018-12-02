@@ -30,7 +30,11 @@ sock.connect(my_id)
 
 last_leader_msg = time.time()
 is_leader = False
-election_timeout = random.uniform(0.1, 0.3)
+
+def et():
+  return random.uniform(0.1, 0.3)
+
+election_timeout = et()
 
 leader = 'FFFF'
 
@@ -79,19 +83,20 @@ def build_appent(entries, dst, prevLogIndex, prevLogTerm):
   htbt['leaderCommit'] = commitIndex
   return htbt
   
-
+def get_entries(rid):
+  global log, nextIndex
+  return log[nextIndex[rid]:][0:100] 
 
 def send_to_replicas(key, val):
   debug("Sending appent to replicas")
-  global my_id, sock, received_buffer, leader, currentTerm, replica_ids, sock, last_heartbeat, votedFor
-  prevLogIndex = len(log) - 2
-  prevLogTerm = 0 if len(log) < 2 else log[prevLogIndex]['term']
-  entries = [{'key': key, 'value': val, 'term': currentTerm}]
+  global my_id, sock, received_buffer, leader, commitIndex, currentTerm, nextIndex, log, replica_ids, sock, last_heartbeat, votedFor
   
   appents = dict()
   for rid in replica_ids:
+    entries = get_entries(rid)
+    prevLogIndex = nextIndex[rid] - 1
+    prevLogTerm = 0 if prevLogIndex is -1 else log[prevLogIndex]['term']
     appents[rid] = json.dumps(build_appent(entries, rid, prevLogIndex, prevLogTerm))
-    # naive.... also need ot check quorum achievement
  
   timeout = .3
   last_event = time.time()
@@ -113,19 +118,28 @@ def send_to_replicas(key, val):
           received_buffer.append(msg)
           debug(json.dumps(received_buffer))
           continue
-        last_event = time.time()
-        debug("Received response")
-        appents.pop(msg['src'])
-        oks.add(msg['src'])
-        nextIndex[msg['src']] = msg['commitIndex'] + 1
-        matchIndex[msg['src']] = msg['lastApplied']
-      
-        if len(oks) > (cluster_size / 2):
-          # yee haw
-          lastApplied = len(log) - 1
-          return True
-    
-          
+
+        if msg['commitIndex'] == commitIndex and msg['success']:
+          last_event = time.time()
+          debug("Received response")
+          appents.pop(msg['src'], None)
+          oks.add(msg['src'])
+          nextIndex[msg['src']] = msg['commitIndex'] + 1
+          matchIndex[msg['src']] = msg['lastApplied']
+        
+          if len(oks) > (cluster_size / 2):
+            # yee haw
+            lastApplied = len(log) - 1
+            return True
+        else:
+          nextIndex[msg['src']] = msg['commitIndex'] + 1
+          matchIndex[msg['src']] = msg['lastApplied']
+          if appents.get(msg['src']):
+            rid = msg['src'] 
+            entries = log[nextIndex[rid]:] 
+            prevLogIndex = nextIndex[rid] - 1
+            prevLogTerm = 0 if prevLogIndex is -1 else log[prevLogIndex]['term']
+            appents[rid] = json.dumps(build_appent(entries, rid, prevLogIndex, prevLogTerm))
     
 count = 0
 def respond_leader_get_put(msg):
@@ -175,7 +189,7 @@ def respond_get_put(msg):
 
 # respond to the provided msg with a failure message
 def respond_with_fail(msg):
-  debug("Responding with fail", force=True)
+  debug("Responding with fail")
   response = {}
   response['src'] = my_id
   response['dst'] = msg['src']
@@ -197,7 +211,7 @@ def handle_append_entries(msg):
   res['dst'] = msg['src']
   res['type'] = 'appent_res'
   ## do something
-  if msg['term'] < currentTerm or (len(msg['entries']) > 0 and msg['prevLogIndex'] > -1 and (len(log) < msg['prevLogIndex'] or log[msg['prevLogIndex']]['term'] != msg['prevLogTerm'])):
+  if msg['term'] < currentTerm or (len(msg['entries']) > 0 and msg['prevLogIndex'] > -1 and (len(log) <= msg['prevLogIndex'] or log[msg['prevLogIndex']]['term'] != msg['prevLogTerm'])):
     res['leader'] = leader
     res['term'] = currentTerm
     res['success'] = False
@@ -212,6 +226,7 @@ def handle_append_entries(msg):
     res['leader'] = leader
     res['term'] = currentTerm
     res['success'] = True
+    return sock.send(json.dumps(res))
   else:
     log_index = msg['prevLogIndex'] + 1
     if len(log) > log_index:
@@ -234,7 +249,6 @@ def handle_append_entries(msg):
     res['leader'] = leader
     res['commitIndex'] = commitIndex
     res['lastApplied'] = lastApplied
-    election_timeout = random.uniform(0.1, 0.3)
     return sock.send(json.dumps(res))
 
 
@@ -249,15 +263,16 @@ def request_vote(rid):
   req['term'] = currentTerm
   req['candidateId'] = my_id
   req['lastLogIndex'] = len(log) - 1
-  req['lastLogTerm'] = 0
+  req['lastLogTerm'] = 0 if len(log) is 0 else log[req['lastLogIndex']]['term']
   req_raw = json.dumps(req)
   sock.send(req_raw)
 
 # begin election
 def begin_election():
   debug("Beginning election")
-  global currentTerm, votedFor, votesReceived, is_holding_election, last_leader_msg
+  global currentTerm, votedFor, votesReceived, is_holding_election, last_leader_msg, election_timeout
   currentTerm = currentTerm + 1
+  election_timeout = et()
   votedFor[currentTerm] = my_id
   votesReceived = [my_id]
   is_holding_election = True
@@ -265,10 +280,15 @@ def begin_election():
   for rid in replica_ids:
     request_vote(rid)
 
+# is the received request for vote up to date??
+def is_up_to_date(cand_msg):
+  global currentTerm, log
+  return cand_msg['lastLogTerm'] > currentTerm or cand_msg['lastLogIndex'] >= len(log) - 1
+
 # handle request vote
 def handle_request_vote(msg):
   debug("Received request for vote from " + str(msg['src'])) 
-  global votedFor, currentTerm, last_leader_msg
+  global votedFor, currentTerm, last_leader_msg, election_timeout
   res = {}
   res['src'] = my_id
   res['dst'] = msg['src']
@@ -276,7 +296,8 @@ def handle_request_vote(msg):
   res['leader'] = 'FFFF'
   if msg['term'] < currentTerm:
     res['voteGranted'] = False
-  elif votedFor.get(currentTerm, None) in [None, msg['candidateId']]:
+  elif votedFor.get(currentTerm, None) in [None, msg['candidateId']] and is_up_to_date(msg):
+    election_timeout = et()
     #  initial election case  | every other election  TODO: check log matching
     if ((currentTerm == 0) or (msg['term'] >= currentTerm)): 
       res['voteGranted'] = True
@@ -325,16 +346,27 @@ def handle_vote_received(msg):
     send_heartbeat() 
 
 def retry_appents():
-  global nextIndex, matchIndex, log, commitIndex, sock
+  global replica_ids, nextIndex, matchIndex, log, commitIndex, sock
   for rid in replica_ids:
+    debug('here')
     # for each replica, send what we think they don't have
     # what we think they don't have is everything past lastIndex[rid] inclusive
     if nextIndex[rid] >= commitIndex: continue
-    entries_to_send = log[nextIndex:]
+    entries_to_send = get_entries(rid)
     
     appent = build_appent(entries_to_send, rid, nextIndex - 1, 0 if nextIndex == 0 else log[nextIndex - 1]['term'])
-    sock.send(json.dumps(appent))
-  
+    appent_raw = json.dumps(appent)
+    debug(str(len(appent_raw)), force=True)
+
+    sock.send(appent_raw)
+ 
+def handle_appent_res(msg):
+  global nextIndex, matchIndex
+  rid = msg['src']
+  nextIndex[rid] = msg['commitIndex']
+  matchIndex[rid] = msg['lastApplied']
+  return
+ 
 ######################################
 ############## event loop ############
 ######################################
@@ -382,8 +414,8 @@ while True:
   elif msg['type'] == 'appent':
     handle_append_entries(msg)
     last_leader_msg = time.time()
-#    elif msg['type'] == 'appent_res':
-#      handle_appent_res(msg)
+  elif msg['type'] == 'appent_res':
+    handle_appent_res(msg)
   elif msg['type'] == 'reqvot':
     handle_request_vote(msg)
   elif msg['type'] == 'reqvot_res':
