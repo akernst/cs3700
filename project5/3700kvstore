@@ -32,7 +32,7 @@ last_leader_msg = time.time()
 is_leader = False
 
 def et():
-  return random.uniform(0.1, 0.3)
+  return random.uniform(0.2, 0.4)
 
 election_timeout = et()
 
@@ -61,13 +61,25 @@ DEBUG = False
 
 received_buffer = []
 
+
+timeouts = dict()
+for rid in replica_ids:
+  timeouts[rid] = dict()    
+  timeouts[rid]['to'] = 0.3
+  timeouts[rid]['last'] = 0
+
 ######################################
 ######## function definitions ########
 ######################################
 
+init_time = time.time()
+
 def debug(msg, **kwargs):
   if DEBUG or kwargs.get('force'):
-    print(my_color + "Replica " + str(my_id) + " :: " + str(time.time()) + " :: " + msg + '\033[0m')
+    clock = time.time()
+    print(my_color + "Replica " + str(my_id) + " :: " + str(clock) + " (" + str(clock-init_time) + ") :: " + msg + '\033[0m')
+
+debug("", force=True)
 
 def build_appent(entries, dst, prevLogIndex, prevLogTerm):
   global my_id, sock, received_buffer, leader, currentTerm, replica_ids, sock, last_heartbeat, votedFor
@@ -95,7 +107,7 @@ def send_to_replicas(key, val):
   for rid in replica_ids:
     entries = get_entries(rid)
     prevLogIndex = nextIndex[rid] - 1
-    prevLogTerm = 0 if prevLogIndex is -1 else log[prevLogIndex]['term']
+    prevLogTerm = 0 if prevLogIndex >= len(log) or prevLogIndex is -1 else log[prevLogIndex]['term']
     appents[rid] = json.dumps(build_appent(entries, rid, prevLogIndex, prevLogTerm))
  
   timeout = .3
@@ -144,7 +156,7 @@ def send_to_replicas(key, val):
 count = 0
 def respond_leader_get_put(msg):
   debug("Handling a get/put as the leader")
-  global count, leader, my_id, kvstore, currentTerm
+  global count, leader, my_id, kvstore, currentTerm, commitIndex
 
   response = {}
   response['src'] = my_id
@@ -178,7 +190,7 @@ def respond_get_put(msg):
     return
   if is_leader:
     return respond_leader_get_put(msg)
-  debug("Responding with redirect")
+  debug("Responding with redirect to " + str(leader), force=True)
   response = {}
   response['src'] = my_id
   response['dst'] = msg['src']
@@ -269,7 +281,7 @@ def request_vote(rid):
 
 # begin election
 def begin_election():
-  debug("Beginning election")
+  debug("Beginning election", force=True)
   global currentTerm, votedFor, votesReceived, is_holding_election, last_leader_msg, election_timeout
   currentTerm = currentTerm + 1
   election_timeout = et()
@@ -287,8 +299,10 @@ def is_up_to_date(cand_msg):
 
 # handle request vote
 def handle_request_vote(msg):
-  debug("Received request for vote from " + str(msg['src'])) 
+  debug("Received request for vote from " + str(msg['src']), force=True) 
   global votedFor, currentTerm, last_leader_msg, election_timeout
+  debug('LA: ' + str(lastApplied), force=True)
+  debug('CI: ' + str(commitIndex), force=True)
   res = {}
   res['src'] = my_id
   res['dst'] = msg['src']
@@ -321,9 +335,10 @@ def send_heartbeat():
   htbt['entries'] = []
   htbt['term'] = currentTerm
   for rid in replica_ids:
-    htbt['dst'] = rid
-    sock.send(json.dumps(htbt))
-  last_heartbeat = time.time()
+    if time.time() - timeouts[rid]['last'] > timeouts[rid]['to']:
+      htbt['dst'] = rid
+      sock.send(json.dumps(htbt))
+      timeouts[rid]['last'] = time.time()
   return
 
 def handle_vote_received(msg):
@@ -333,7 +348,7 @@ def handle_vote_received(msg):
     return
   votesReceived.append(msg['src'])
   if len(votesReceived) > (cluster_size / 2):
-    debug("I've won the election")
+    debug("I've won the election", force=True)
     # we won the election! 
     # send a heartbeat 
     leader = my_id
@@ -346,19 +361,20 @@ def handle_vote_received(msg):
     send_heartbeat() 
 
 def retry_appents():
-  global replica_ids, nextIndex, matchIndex, log, commitIndex, sock
+  global replica_ids, nextIndex, matchIndex, log, commitIndex, sock, timeouts
   for rid in replica_ids:
+    if time.time() - timeouts[rid]['last'] < timeouts[rid]['to']: continue
     debug('here')
     # for each replica, send what we think they don't have
     # what we think they don't have is everything past lastIndex[rid] inclusive
-    if nextIndex[rid] >= commitIndex: continue
+    if nextIndex[rid] >= commitIndex or nextIndex[rid] >= len(log): continue
     entries_to_send = get_entries(rid)
     
-    appent = build_appent(entries_to_send, rid, nextIndex - 1, 0 if nextIndex == 0 else log[nextIndex - 1]['term'])
+    appent = build_appent(entries_to_send, rid, nextIndex[rid] - 1, 0 if nextIndex[rid] == 0 else log[nextIndex[rid]]['term'])
     appent_raw = json.dumps(appent)
-    debug(str(len(appent_raw)), force=True)
 
     sock.send(appent_raw)
+    timeouts[rid]['last'] = time.time()
  
 def handle_appent_res(msg):
   global nextIndex, matchIndex
@@ -391,12 +407,10 @@ def receive_message(sock):
 
 while True:
 
-  if is_leader and time.time() - last_heartbeat > heartbeat_timeout:
-    send_heartbeat()	
-
-  # keep trying to get ahold of our MIA followers
   if is_leader:
     retry_appents()
+    send_heartbeat()	
+
 
   msg = None
   if leader != 'FFFF' and len(received_buffer) != 0:
