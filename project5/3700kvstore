@@ -30,7 +30,7 @@ sock.connect(my_id)
 
 last_leader_msg = time.time()
 is_leader = False
-election_timeout = random.uniform(0.3, 0.6)
+election_timeout = random.uniform(0.1, 0.3)
 
 leader = 'FFFF'
 
@@ -45,8 +45,8 @@ commitIndex = -1
 lastApplied = -1
 
 # leader state
-nextIndex = {}
-matchIndex = {}
+nextIndex = {} 
+matchIndex = {} #lastapplieds
 
 heartbeat_timeout = 0.1
 last_heartbeat = time.time()
@@ -111,6 +111,7 @@ def send_to_replicas(key, val):
         msg = json.loads(msg_raw)
         if msg['type'] != 'appent_res':
           received_buffer.append(msg)
+          debug(json.dumps(received_buffer))
           continue
         last_event = time.time()
         debug("Received response")
@@ -126,10 +127,10 @@ def send_to_replicas(key, val):
     
           
     
-
+count = 0
 def respond_leader_get_put(msg):
   debug("Handling a get/put as the leader")
-  global leader, my_id, kvstore, currentTerm
+  global count, leader, my_id, kvstore, currentTerm
 
   response = {}
   response['src'] = my_id
@@ -143,19 +144,24 @@ def respond_leader_get_put(msg):
     response['value'] = "" if val is None else val
     return sock.send(json.dumps(response))
   elif msg['type'] == 'put':
+    count = count + 1
+    debug(str(count))
     # naive not-really-consensus-implementation
     log.append({'key': msg['key'], 'value': msg['value'], 'term': currentTerm})
     commitIndex = len(log) - 1
     if send_to_replicas(msg['key'], msg['value']):
       kvstore[msg['key']] = msg['value']
       return sock.send(json.dumps(response))
-    
+    else:
+      # should probably do something
+      return 
 
 def respond_get_put(msg):
   debug("Responding to a get or a put")
-  global is_leader, leader, sock
+  global received_buffer, is_leader, leader, sock
   if leader == 'FFFF':
-    return respond_with_fail(msg)
+    received_buffer.append(msg)
+    return
   if is_leader:
     return respond_leader_get_put(msg)
   debug("Responding with redirect")
@@ -169,7 +175,7 @@ def respond_get_put(msg):
 
 # respond to the provided msg with a failure message
 def respond_with_fail(msg):
-  debug("Responding with fail")
+  debug("Responding with fail", force=True)
   response = {}
   response['src'] = my_id
   response['dst'] = msg['src']
@@ -200,6 +206,7 @@ def handle_append_entries(msg):
     return sock.send(json.dumps(res))
   elif len(msg['entries']) == 0:
     # heartbeat
+    leader = msg['leader']
     res['commitIndex'] = commitIndex
     res['lastApplied'] = lastApplied
     res['leader'] = leader
@@ -227,7 +234,7 @@ def handle_append_entries(msg):
     res['leader'] = leader
     res['commitIndex'] = commitIndex
     res['lastApplied'] = lastApplied
-    election_timeout = random.uniform(0.3, 0.6)
+    election_timeout = random.uniform(0.1, 0.3)
     return sock.send(json.dumps(res))
 
 
@@ -251,7 +258,7 @@ def begin_election():
   debug("Beginning election")
   global currentTerm, votedFor, votesReceived, is_holding_election, last_leader_msg
   currentTerm = currentTerm + 1
-  votedFor = my_id
+  votedFor[currentTerm] = my_id
   votesReceived = [my_id]
   is_holding_election = True
   last_leader_msg = time.time() 
@@ -300,7 +307,7 @@ def send_heartbeat():
 
 def handle_vote_received(msg):
   debug('Received vote from ' + str(msg['src']))
-  global leader, is_leader, votesReceived, is_holding_election
+  global leader, is_leader, my_id, votesReceived, is_holding_election
   if not is_holding_election or not msg['voteGranted']:
     return
   votesReceived.append(msg['src'])
@@ -334,6 +341,22 @@ def retry_appents():
 
 debug("Election Timeout " + str(election_timeout))
 
+
+def receive_message(sock):
+  ready = select.select([sock], [], [], 0.01)[0]
+  msg = None
+  if sock in ready:
+    msg_raw = sock.recv(32768)
+    if len(msg_raw) == 0: return None
+    msg = json.loads(msg_raw)
+
+  if msg is not None:
+    if msg['dst'] != str(my_id): 
+      debug('Message not for me')
+      return None
+
+  return msg
+
 while True:
 
   if is_leader and time.time() - last_heartbeat > heartbeat_timeout:
@@ -344,33 +367,27 @@ while True:
     retry_appents()
 
   msg = None
-  if len(received_buffer) != 0:
+  if leader != 'FFFF' and len(received_buffer) != 0:
+    debug(json.dumps(received_buffer))
+    debug(str(leader))
     msg = received_buffer.pop(0)
   else:
-    ready = select.select([sock], [], [], 0.01)[0]
-  
-    if sock in ready:
-      msg_raw = sock.recv(32768)
-      if len(msg_raw) == 0: continue
+    msg = receive_message(sock)
 
-      msg = json.loads(msg_raw)
-  
-  if msg is not None:
-    if msg['dst'] != str(my_id): 
-      debug('Message not for me')
-      continue
-	  
-    if msg['type'] in ['get', 'put']:
-      respond_get_put(msg)
-    elif msg['type'] == 'appent':
-      handle_append_entries(msg)
-      last_leader_msg = time.time()
+  if msg is None:
+    continue	 
+
+  if msg['type'] in ['get', 'put']:
+    respond_get_put(msg)
+  elif msg['type'] == 'appent':
+    handle_append_entries(msg)
+    last_leader_msg = time.time()
 #    elif msg['type'] == 'appent_res':
 #      handle_appent_res(msg)
-    elif msg['type'] == 'reqvot':
-      handle_request_vote(msg)
-    elif msg['type'] == 'reqvot_res':
-      handle_vote_received(msg)
+  elif msg['type'] == 'reqvot':
+    handle_request_vote(msg)
+  elif msg['type'] == 'reqvot_res':
+    handle_vote_received(msg)
       
 		
   clock = time.time()
