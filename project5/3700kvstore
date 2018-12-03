@@ -43,11 +43,10 @@ def debug(msg, **kwargs):
     clock = time.time()
     print(my_color + "Replica " + str(my_id) + " :: " + str(clock) + " (" + str(clock-init_time) + ") :: " + msg + '\033[0m')
 
-debug("", force=True)
 
 # helpers and constants for all replicas
 def et():
-  return random.uniform(0.1, 0.3)
+  return random.uniform(0.1, 0.5)
 
 current_term = 0
 voted_for = dict() # map from term -> rid
@@ -80,6 +79,8 @@ waiting_put = None
 waiting_put_mid = None
 waiting_put_confirms = set()
 waiting_timestamp = time.time()
+retry_timeout = 0.1
+
 # helpers and constants for candidate replicas
 received_votes = set()
 
@@ -121,7 +122,7 @@ def bow_out(new_term, new_leader):
 
 def nominate():
   debug('Nominating myself!')
-  global my_role, voted_for, last_event, received_votes, current_term, election_timeout, replica_ids, my_id, reqvot_buffer
+  global my_role, voted_for, last_event, retry_timeout, received_votes, current_term, election_timeout, replica_ids, my_id, reqvot_buffer
   my_role = CAND 
   current_term = current_term + 1
   election_timeout = et()
@@ -129,7 +130,7 @@ def nominate():
   voted_for[current_term] = my_id
   received_votes = set([my_id])
   for rid in replica_ids:
-    rep_timeouts[rid] = {'to': 0.1, 'last': 0}
+    rep_timeouts[rid] = {'to': retry_timeout, 'last': 0}
     req = {'term': current_term, 'candidateId': my_id, 'lastLogIndex': len(log) - 1, 'lastLogTerm': log[-1]['term']}
     req = add_headers(req, rid, 'reqvot')
     reqvot_buffer[rid] = json.dumps(req)
@@ -137,13 +138,13 @@ def nominate():
 
 def inaugurate():
   debug('Inaugurating myself!')
-  global leader, my_role, rep_timeouts, match_index, reqvot_buffer, next_index, replica_ids, my_id, log, commit_index
+  global leader, my_role, rep_timeouts, match_index, retry_timeout, reqvot_buffer, next_index, replica_ids, my_id, log, commit_index
   my_role = LEAD
   leader = my_id
   reqvot_buffer = {}
   received_votes = set()
   for rid in replica_ids:
-    rep_timeouts[rid] = {'to': 0.1, 'last': 0}
+    rep_timeouts[rid] = {'to': retry_timeout, 'last': 0}
     next_index[rid] = len(log)
     match_index[rid] = 0
     req = {'term': current_term, 'leaderId': leader, 'prevLogIndex': 0, 'prevLogTerm': 0, 'entries': [], 'leaderCommit': commit_index}
@@ -158,7 +159,7 @@ def redirect(msg):
   return client_response_buffer.append(json.dumps(resp))
 
 def leader_get_put(msg):
-  global log, replica_ids, waiting_timestamp, kvstore, my_id, client_response_buffer, current_term, waiting_put, waiting_put_confirms, waiting_put_mid
+  global log, replica_ids, waiting_timestamp, kvstore, my_id, client_response_buffer, current_term, waiting_put, waiting_put_confirms, waiting_put_mid, rep_timeouts
   if msg['type'] == 'get':
     value = kvstore.get(msg['key'], "")
     resp = {'value': value, 'MID': msg['MID']}
@@ -167,6 +168,8 @@ def leader_get_put(msg):
   else:
     new_entry = {'key': msg['key'], 'value': msg['value'], 'term': current_term}
     log.append(new_entry)
+    for repto in rep_timeouts.itervalues():
+      repto['last'] = 0
     waiting_put = msg
     waiting_put_mid = msg['MID']
     waiting_put_confirms = set([my_id])
@@ -266,7 +269,6 @@ def process_buff_foll():
 
     elif msg['type'] == 'reqvot':
       debug('Received request for vote from ' + str(msg['src']))
-      last_event = time.time()
       if msg['term'] < current_term:
         resp = {'term': current_term, 'voteGranted': False}
         resp = add_headers(resp, msg['src'], 'reqvot_res')
@@ -293,6 +295,7 @@ def process_buff_foll():
 
 def process_buff_lead():
   global next_index, match_index, kvstore, rep_timeouts, commit_index, last_applied, leader, client_response_buffer, log, replica_response_buffer, received_buffer, reqvot_buffer, received_votes, voted_for, current_term, cluster_size, waiting_put, waiting_put_mid, waiting_put_confirms
+  
   if len(received_buffer) == 0: return
 
   remainder = []
@@ -330,7 +333,6 @@ def process_buff_lead():
           if msg.get('forMID') == waiting_put_mid:
             waiting_put_confirms.add(msg['src'])
             if len(waiting_put_confirms) > (cluster_size / 2):              
-              debug('TIME TAKEN: '+str(time.time() - waiting_timestamp))
               commit_index = commit_index + 1
               last_applied = commit_index
               kvstore[waiting_put['key']] = waiting_put['value']
@@ -349,7 +351,7 @@ def process_buff_lead():
       else:
         resp = {'term': current_term, 'voteGranted': False}
         resp = add_headers(resp, msg['src'], 'reqvot_res')
-        replica_response_buffer.append(json.dump(resp))
+        replica_response_buffer.append(json.dumps(resp))
     
     elif msg['type'] == 'reqvot_res':
       if msg['term'] > current_term:
