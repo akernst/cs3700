@@ -29,7 +29,7 @@ sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
 sock.connect(my_id)
 
 
-DEBUG = True
+DEBUG = False
 
 
 ######################################
@@ -244,7 +244,7 @@ def process_buff_foll():
     elif msg['type'] == 'appent':
       last_event = time.time()
       if msg['term'] < current_term or msg['prevLogIndex'] >= len(log) or msg['prevLogTerm'] != log[msg['prevLogIndex']]['term']:
-        resp = {'term': current_term, 'success': False, 'nextIndex': msg['prevLogIndex']}
+        resp = {'term': current_term, 'success': False, 'nextIndex': commit_index}
         if msg.get('forMID'): 
           resp['forMID'] = msg['forMID']
         resp = add_headers(resp, msg['src'], 'appent_res')
@@ -256,11 +256,12 @@ def process_buff_foll():
           log = log[0:msg['prevLogIndex']+1]
           for entry in msg['entries']:
             log.append(entry)
-          if msg['leaderCommit'] > commit_index:
-            commit_index = min(msg['leaderCommit'], len(log) - 1)
-            while commit_index > last_applied:
-              last_applied = last_applied+1
-              kvstore[log[last_applied]['key']] = log[last_applied]['value']
+        if msg['leaderCommit'] > commit_index:
+          commit_index = min(msg['leaderCommit'], len(log) - 1)
+          debug("Committed to " + str(commit_index) + str(leader), force=True)
+          while commit_index > last_applied:
+            last_applied = last_applied+1
+            kvstore[log[last_applied]['key']] = log[last_applied]['value']
         resp = {'term': current_term, 'success': True, 'nextIndex': len(log)}
         if msg.get('forMID'):
           resp['forMID'] = msg['forMID']
@@ -333,7 +334,8 @@ def process_buff_lead():
         if waiting_put_mid is not None:
           if msg.get('forMID') == waiting_put_mid:
             waiting_put_confirms.add(msg['src'])
-            if len(waiting_put_confirms) > (cluster_size / 2):              
+            if len(waiting_put_confirms) > (cluster_size / 2.0):              
+              debug("Leader committing log idx " + (str(commit_index + 1)) + str(leader), force=True)
               commit_index = commit_index + 1
               last_applied = commit_index
               kvstore[waiting_put['key']] = waiting_put['value']
