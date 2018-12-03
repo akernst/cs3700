@@ -28,45 +28,9 @@ my_color = colors[(1 + sorted_ids.index(my_id)) % 256]
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
 sock.connect(my_id)
 
-last_leader_msg = time.time()
-is_leader = False
 
-def et():
-  return random.uniform(0.2, 0.5)
+DEBUG = True
 
-election_timeout = et()
-
-leader = 'FFFF'
-
-currentTerm = 0
-votedFor = {}
-votesReceived = []
-is_holding_election = False
-
-log = []
-
-commitIndex = -1
-lastApplied = -1
-
-# leader state
-nextIndex = {} 
-matchIndex = {} #lastapplieds
-
-heartbeat_timeout = 0.1
-last_heartbeat = time.time()
-
-kvstore = {}
-
-DEBUG = False
-
-received_buffer = []
-
-
-timeouts = dict()
-for rid in replica_ids:
-  timeouts[rid] = dict()    
-  timeouts[rid]['to'] = 0.3
-  timeouts[rid]['last'] = 0
 
 ######################################
 ######## function definitions ########
@@ -75,387 +39,14 @@ for rid in replica_ids:
 init_time = time.time()
 
 def debug(msg, **kwargs):
-  if DEBUG :
-#or kwargs.get("force") :
+  if DEBUG or kwargs.get("force") :
     clock = time.time()
     print(my_color + "Replica " + str(my_id) + " :: " + str(clock) + " (" + str(clock-init_time) + ") :: " + msg + '\033[0m')
 
 debug("", force=True)
 
-def build_appent(entries, dst, prevLogIndex, prevLogTerm):
-  global my_id, sock, received_buffer, leader, currentTerm, replica_ids, sock, last_heartbeat, votedFor
-  htbt = {}
-  htbt['src'] = my_id
-  htbt['dst'] = dst
-  htbt['leader'] = leader
-  htbt['type'] = 'appent'
-  htbt['entries'] = entries
-  htbt['term'] = currentTerm
-  htbt['prevLogIndex'] = prevLogIndex
-  htbt['prevLogTerm'] = prevLogTerm
-  htbt['leaderCommit'] = commitIndex
-  return htbt
-  
-def get_entries(rid):
-  global log, nextIndex
-  return log[nextIndex[rid]:][0:100] 
-
-def send_to_replicas(key, val):
-  debug("Sending appent to replicas")
-  global my_id, sock, received_buffer, leader, commitIndex, currentTerm, nextIndex, log, replica_ids, sock, last_heartbeat, votedFor
-  
-  appents = dict()
-  for rid in replica_ids:
-    entries = get_entries(rid)
-    prevLogIndex = nextIndex[rid] - 1
-    prevLogTerm = 0 if (prevLogIndex >= len(log) or prevLogIndex == -1) else log[prevLogIndex]['term']
-    appents[rid] = json.dumps(build_appent(entries, rid, prevLogIndex, prevLogTerm))
- 
-  timeout = .3
-  last_event = time.time()
-  oks = {my_id}
-  debug("Entering wait for quorum achievement")
-  while True:   
-    for appent in appents.itervalues():
-      sock.send(appent)
-    last_event = time.time()
-
-    while True: 
-      if time.time() - last_event > timeout: break # resend stuff we gotta get quorum!!!
-      ready = select.select([sock], [], [], .01)[0]
-      if sock in ready:
-        msg_raw = sock.recv(32768)
-        if len(msg_raw) == 0: continue
-        msg = json.loads(msg_raw)
-        if msg['type'] != 'appent_res':
-          received_buffer.append(msg)
-          debug(json.dumps(received_buffer))
-          continue
-
-        if msg['commitIndex'] == commitIndex and msg['success']:
-          last_event = time.time()
-          debug("Received response")
-          appents.pop(msg['src'], None)
-          oks.add(msg['src'])
-          nextIndex[msg['src']] = msg['commitIndex'] + 1
-          matchIndex[msg['src']] = msg['lastApplied']
-        
-          if len(oks) > (cluster_size / 2):
-            # yee haw
-            lastApplied = len(log) - 1
-            return True
-        else:
-          nextIndex[msg['src']] = msg['commitIndex'] + 1
-          matchIndex[msg['src']] = msg['lastApplied']
-          if appents.get(msg['src']):
-            rid = msg['src'] 
-            entries = log[nextIndex[rid]:] 
-            prevLogIndex = nextIndex[rid] - 1
-            if prevLogIndex >= len(log):
-              debug("PrevLogIndex too big ! " + str(prevLogIndex) +" >= " + str(len(log)), force=True)
-            prevLogTerm = 0 if prevLogIndex == -1 else log[prevLogIndex]['term']
-            appents[rid] = json.dumps(build_appent(entries, rid, prevLogIndex, prevLogTerm))
-    
-count = 0
-def respond_leader_get_put(msg):
-  debug("Handling a get/put as the leader", force=True)
-  global count, leader, my_id, kvstore, currentTerm, commitIndex
-
-  response = {}
-  response['src'] = my_id
-  response['dst'] = msg['src']
-  response['leader'] = leader
-  response['type'] = 'ok'
-  response['MID'] = msg['MID']
-
-  if msg['type'] == 'get':
-    val = kvstore.get(msg['key'])
-    response['value'] = "" if val is None else val
-    return sock.send(json.dumps(response))
-  elif msg['type'] == 'put':
-    count = count + 1
-    debug(str(count))
-    # naive not-really-consensus-implementation
-    log.append({'key': msg['key'], 'value': msg['value'], 'term': currentTerm})
-    commitIndex = len(log) - 1
-    if send_to_replicas(msg['key'], msg['value']):
-      kvstore[msg['key']] = msg['value']
-      return sock.send(json.dumps(response))
-    else:
-      # should probably do something
-      return 
-
-def respond_get_put(msg):
-  debug("Responding to a get or a put")
-  global received_buffer, is_leader, leader, sock
-  if leader == 'FFFF':
-    received_buffer.append(msg)
-    return
-  if is_leader:
-    return respond_leader_get_put(msg)
-  debug("Responding with redirect to " + str(leader), force=True)
-  response = {}
-  response['src'] = my_id
-  response['dst'] = msg['src']
-  response['leader'] = leader
-  response['type'] = 'redirect'
-  response['MID'] = msg['MID']
-  return sock.send(json.dumps(response))
-
-# respond to the provided msg with a failure message
-def respond_with_fail(msg):
-  debug("Responding with fail")
-  response = {}
-  response['src'] = my_id
-  response['dst'] = msg['src']
-  response['leader'] = msg['leader']
-  response['type'] = 'fail'
-  response['MID'] = msg['MID']
-  response_raw = json.dumps(response)
-  return sock.send(response_raw)
-
-# handle append entries
-def handle_append_entries(msg):
-  debug("Handling append entries")
-  global log, commitIndex, kvstore, currentTerm, leader, lastApplied, last_leader_msg
-  
-  last_leader_msg = time.time()
-  debug(json.dumps(msg)) 
-  res = {}
-  res['src'] = my_id
-  res['dst'] = msg['src']
-  res['type'] = 'appent_res'
-  ## do something
-  if msg['term'] < currentTerm or (len(msg['entries']) > 0 and msg['prevLogIndex'] > -1 and (len(log) <= msg['prevLogIndex'] or log[msg['prevLogIndex']]['term'] != msg['prevLogTerm'])):
-    res['leader'] = leader
-    res['term'] = currentTerm
-    res['success'] = False
-    res['commitIndex'] = commitIndex
-    res['lastApplied'] = lastApplied
-    return sock.send(json.dumps(res))
-  elif len(msg['entries']) == 0:
-    # heartbeat
-    leader = msg['leader']
-    res['commitIndex'] = commitIndex
-    res['lastApplied'] = lastApplied
-    res['leader'] = leader
-    res['term'] = currentTerm
-    res['success'] = True
-    return sock.send(json.dumps(res))
-  else:
-    log_index = msg['prevLogIndex'] + 1
-    if len(log) > log_index:
-      log = log[0:log_index - 1]
-    for entry in msg['entries']:
-      kvstore[entry['key']] = entry['value']
-      log.append(entry)
-    
-    commitIndex = min(msg['leaderCommit'], len(log) - 1)
-    
-    # apply everything up to and including prevLogIndex
-    for i in range(lastApplied + 1, msg['prevLogIndex'] + 1):
-      kvstore[log[i]['key']] = log[i]['value']
-    lastApplied = msg['prevLogIndex']
-
-    leader = msg['leader']
-    currentTerm = msg['term']
-    res['term'] = currentTerm
-    res['success'] = True
-    res['leader'] = leader
-    res['commitIndex'] = commitIndex
-    res['lastApplied'] = lastApplied
-    return sock.send(json.dumps(res))
-
-
-# request a vote
-def request_vote(rid):
-  debug("Requesting vote from" + str(rid))
-  req = {}
-  req['src'] = my_id
-  req['dst'] = rid
-  req['type'] = 'reqvot'
-  req['leader'] = 'FFFF'
-  req['term'] = currentTerm
-  req['candidateId'] = my_id
-  req['lastLogIndex'] = len(log) - 1
-  req['lastLogTerm'] = 0 if len(log) is 0 else log[req['lastLogIndex']]['term']
-  req_raw = json.dumps(req)
-  sock.send(req_raw)
-
-# begin election
-def begin_election():
-  global leader, currentTerm, votedFor, votesReceived, is_holding_election, last_leader_msg, election_timeout
-  
-  currentTerm = currentTerm + 1
-  debug("Beginning election " + str(currentTerm), force=True)
-  election_timeout = et()
-  votedFor[currentTerm] = my_id
-  votesReceived = [my_id]
-  is_holding_election = True
-  last_leader_msg = time.time() 
-  leader = 'FFFF'
-  for rid in replica_ids:
-    request_vote(rid)
-
-# is the received request for vote up to date??
-def is_up_to_date(cand_msg):
-  global currentTerm, log
-  return cand_msg['lastLogTerm'] > currentTerm or cand_msg['lastLogIndex'] >= len(log) - 1
-
-# handle request vote
-def handle_request_vote(msg):
-  debug("Received request for vote from " + str(msg['src'])) 
-  global votedFor, leader, currentTerm, last_leader_msg, election_timeout
-  res = {}
-  res['src'] = my_id
-  res['dst'] = msg['src']
-  res['type'] = 'reqvot_res'
-  if msg['term'] < currentTerm:
-    res['voteGranted'] = False
-  elif votedFor.get(currentTerm, None) in [None, msg['candidateId']] and is_up_to_date(msg):
-    election_timeout = et()
-    res['voteGranted'] = True
-    votedFor[currentTerm] = msg['src']
-    leader = 'FFFF'
-  else:
-    res['voteGranted'] = False
-
-  res['leader'] = leader
-  res['term'] = currentTerm
-  last_leader_msg = time.time()
-  return sock.send(json.dumps(res))
-
-def send_heartbeat():
-  debug("Sending heartbeat", force=True)
-  global my_id, leader, currentTerm, replica_ids, sock, last_heartbeat, votedFor
-  htbt = {}
-  htbt['src'] = my_id
-  htbt['leader'] = leader
-  htbt['type'] = 'appent'
-  htbt['entries'] = []
-  htbt['term'] = currentTerm
-  for rid in replica_ids:
-    if time.time() - timeouts[rid]['last'] > timeouts[rid]['to']:
-      htbt['dst'] = rid
-      sock.send(json.dumps(htbt))
-      timeouts[rid]['last'] = time.time()
-  return
-
-def handle_vote_received(msg):
-  global leader, is_leader, my_id, votesReceived, is_holding_election, replica_ids
-  if not is_holding_election or not msg['voteGranted']:
-    return
-  else:
-    debug("I've won the election "+str(currentTerm), force=True)
-    # we won the election! 
-    # send a heartbeat 
-    leader = my_id
-    is_leader = True
-    votesReceived = []
-    is_holding_election = False
-    for rid in replica_ids:
-      nextIndex[rid] = len(log)
-      matchIndex[rid] = -1
-    send_heartbeat() 
-
-def retry_appents():
-  global replica_ids, nextIndex, matchIndex, log, commitIndex, sock, timeouts
-  for rid in replica_ids:
-    if time.time() - timeouts[rid]['last'] < timeouts[rid]['to']: continue
-    # for each replica, send what we think they don't have
-    # what we think they don't have is everything past lastIndex[rid] inclusive
-    if nextIndex[rid] >= commitIndex or nextIndex[rid] >= len(log): continue
-    entries_to_send = get_entries(rid)
-    
-    appent = build_appent(entries_to_send, rid, nextIndex[rid] - 1, 0 if nextIndex[rid] == 0 else log[nextIndex[rid]]['term'])
-    appent_raw = json.dumps(appent)
-    sock.send(appent_raw)
-    timeouts[rid]['last'] = time.time()
- 
-def handle_appent_res(msg):
-  global nextIndex, matchIndex
-  rid = msg['src']
-  nextIndex[rid] = msg['commitIndex']
-  matchIndex[rid] = msg['lastApplied']
-  return
- 
-######################################
-############## event loop ############
-######################################
-
-debug("Election Timeout " + str(election_timeout))
-
-
-def receive_message(sock):
-  ready = select.select([sock], [], [], 0.01)[0]
-  msg = None
-  if sock in ready:
-    msg_raw = sock.recv(32768)
-    if len(msg_raw) == 0: return None
-    msg = json.loads(msg_raw)
-
-  if msg is not None:
-    if msg['dst'] != str(my_id): 
-      debug('Message not for me')
-      return None
-
-  return msg
-
-while True:
-
-  if is_leader:
-    retry_appents()
-    send_heartbeat()	
-
-
-  msg = None
-  if leader != 'FFFF' and len(received_buffer) != 0:
-    debug(json.dumps(received_buffer), force=True)
-    msg = received_buffer.pop(0)
-  else:
-    msg = receive_message(sock)
-
-  if msg is None:
-    continue	 
-
-  if msg['type'] in ['get', 'put']:
-    respond_get_put(msg)
-  else:
-    if msg['term'] > currentTerm:
-      if is_leader:
-        debug("I'm handing over the keys to the kingdom", force=True)
-        debug(json.dumps(received_buffer), force=True)
-
-      is_leader = False
-      currentTerm = msg['term']
-      leader = msg['leader']
-      is_holding_election = False
-      votesReceived = [] 
- 
-    if msg['type'] == 'appent':
-      handle_append_entries(msg)
-      last_leader_msg = time.time()
-    elif msg['type'] == 'appent_res':
-      handle_appent_res(msg)
-    elif msg['type'] == 'reqvot':
-      handle_request_vote(msg)
-    elif msg['type'] == 'reqvot_res':
-      handle_vote_received(msg)
-      
-		
-  clock = time.time()
-  # if election timeout has occurred
-  if not is_leader and (clock - last_leader_msg) > election_timeout:
-    begin_election()
-    last = clock
-
-"""
-keep track of what our followers know and retry sending them stuff they don't know
-
-handle appent_res as leader
-"""
 # helpers and constants for all replicas
-def et()
+def et():
   return random.uniform(0.2, 0.5)
 
 current_term = 0
@@ -500,14 +91,13 @@ replica_response_buffer = [] # responses that need to be sent to other replicas
 
 # election cycle
 def abdicate(new_term, new_leader):
-  global b_appent_buffer, last_event, appent_buffer, next_index, match_index, rep_timeouts, my_role, current_term, leader, waiting_put, waiting_put_mid, waiting_put_confirms
+  debug('Abdicating!')
+  global last_event, next_index, match_index, rep_timeouts, my_role, current_term, leader, waiting_put, waiting_put_mid, waiting_put_confirms
   current_term = new_term   
   leader = new_leader
   next_index = dict()
   match_index = dict()
   rep_timeouts = dict()
-  b_appent_buffer = []
-  appent_buffer = []
   my_role = FOLL
   last_event = time.time()
   # redirect waiting put
@@ -519,6 +109,7 @@ def abdicate(new_term, new_leader):
   return
 
 def bow_out(new_term, new_leader):
+  debug('Bowing out!')
   global current_term, received_votes, my_role, leader, reqvot_buffer
   my_role = FOLL
   current_term = new_term
@@ -529,6 +120,7 @@ def bow_out(new_term, new_leader):
   return
 
 def nominate():
+  debug('Nominating myself!')
   global my_role, voted_for, last_event, received_votes, current_term, election_timeout, replica_ids, my_id, reqvot_buffer
   my_role = CAND 
   current_term = current_term + 1
@@ -538,12 +130,13 @@ def nominate():
   received_votes = set([my_id])
   for rid in replica_ids:
     rep_timeouts[rid] = {'to': 0.1, 'last': 0}
-    req = {'term': currentTerm, 'candidateId': my_id, 'lastLogIndex': len(log) - 1, 'lastLogTerm': log[-1]['term']}
+    req = {'term': current_term, 'candidateId': my_id, 'lastLogIndex': len(log) - 1, 'lastLogTerm': log[-1]['term']}
     req = add_headers(req, rid, 'reqvot')
-    regvot_buffer[rid] = json.dumps(req)
+    reqvot_buffer[rid] = json.dumps(req)
   return
 
 def inaugurate():
+  debug('Inaugurating myself!')
   global leader, my_role, rep_timeouts, match_index, reqvot_buffer, next_index, replica_ids, my_id, appent_buffer, log, commit_index
   my_role = LEAD
   leader = my_id
@@ -553,7 +146,7 @@ def inaugurate():
     rep_timeouts[rid] = {'to': 0.1, 'last': 0}
     next_index[rid] = len(log)
     match_index[rid] = 0
-    req = {'term': currentTerm, 'leaderId': leader, 'prevLogIndex': 0, 'prevLogTerm': 0, 'entries': [], 'leaderCommit': commit_index}
+    req = {'term': current_term, 'leaderId': leader, 'prevLogIndex': 0, 'prevLogTerm': 0, 'entries': [], 'leaderCommit': commit_index}
     req = add_headers(req, rid, 'appent')
     appent_buffer.append(req)
   return
@@ -606,7 +199,7 @@ def receive_message(sock):
 def send_message(sock, msg):
   return sock.send(msg)
 
-def read_all(sock)
+def read_all(sock):
   global received_buffer
   while True:
     msg = receive_message(sock)
@@ -618,15 +211,151 @@ def read_all(sock)
 
   
 
+def is_log_current(lastLogTerm, lastLogIndex):
+  global log
+  my_last_term = log[-1]['term']
+  if lastLogTerm > my_last_term:
+    return True
+  elif lastLogTerm < my_last_term:
+    return False
+  else: 
+    return lastLogIndex >= len(log) - 1
+
 # process functions for each role
 def process_buff_foll():
-  global replica_response_buffer, received_buffer, reqvot_buffer, received_votes, voted_for, current_term, cluster_size
+  global kvstore, commit_index, last_applied, leader, client_response_buffer, log, replica_response_buffer, received_buffer, reqvot_buffer, received_votes, voted_for, current_term, cluster_size, last_event
+  if len(received_buffer) == 0: return
+
+  remainder = []
+  while len(received_buffer) > 0:
+    msg = received_buffer.pop(0)
+
+    if msg['type'] in ['get', 'put']:
+      if leader == 'FFFF':
+        remainder.append(msg) # deal with it later
+      else:
+        resp = {'MID': msg['MID']}
+        resp = add_headers(resp, msg['src'], 'redirect')
+        client_response_buffer.append(json.dumps(resp))
+
+    elif msg['type'] == 'appent':
+      last_event = time.time()
+      if msg['term'] < current_term or msg['prevLogIndex'] >= len(log) or msg['prevLogTerm'] != log[msg['prevLogIndex']]['term']:
+        resp = {'term': current_term, 'success': False, 'nextIndex': msg['prevLogIndex']}
+        if msg.get('forMID'): 
+          resp['forMID'] = msg['forMID']
+        resp = add_headers(resp, msg['src'], 'appent_res')
+        replica_response_buffer.append(json.dumps(resp))
+      else: # we can append
+        if len(msg['entries']) > 0: # but we only want to modify the log if its not simply a heartbeat
+          log = log[0:msg['prevLogIndex']+1]
+          for entry in msg['entries']:
+            log.append(entry)
+          if msg['leaderCommit'] > commit_index:
+            commit_index = min(msg['leaderCommit'], len(log) - 1)
+            while commit_index > lastApplied:
+              last_applied = last_applied+1
+              kvstore[log[last_applied]['key']] = log[last_applied]['value']
+        resp = {'term': current_term, 'success': True, 'nextIndex': len(log)}
+        if msg.get('forMID'):
+          resp['forMID'] = msg['forMID']
+        resp = add_headers(resp, msg['src'], 'appent_res')
+        replica_response_buffer.append(json.dumps(resp))
+
+    elif msg['type'] == 'reqvot':
+      last_event = time.time()
+      if msg['term'] < current_term:
+        resp = {'term': current_term, 'voteGranted': False}
+        resp = add_headers(resp, msg['src'], 'reqvot_res')
+        replica_response_buffer.append(json.dumps(resp))
+      else:
+        current_term = msg['term']
+        leader = 'FFFF' # we must have moved onto a new term, so we don't know who the leader is!
+        if voted_for.get(current_term, msg['candidateId']) == msg['candidateId'] and is_log_current(msg['lastLogTerm'], msg['lastLogIndex']):
+          voted_for[current_term] = msg['candidateId']
+          resp = {'voteGranted': True, 'term': current_term}
+          resp = add_headers(resp, msg['src'], 'reqvot_res')
+          client_response_buffer.append(json.dumps(resp))
+        else:
+          resp = {'voteGranted': False, 'term': current_term}
+          resp = add_headers(resp, msg['src'], 'reqvot_res')
+          client_response_buffer.append(json.dumps(resp))
+
+    elif msg['type'] in ['reqvot_res', 'appent_res']:
+      if msg['term'] > current_term:
+        leader = msg['leader']
+
+  received_buffer = remainder
 
 def process_buff_lead():
-  global replica_response_buffer, received_buffer, reqvot_buffer, received_votes, voted_for, current_term, cluster_size
+  global next_index, match_index, kvstore, commit_index, last_applied, leader, client_response_buffer, log, replica_response_buffer, received_buffer, reqvot_buffer, received_votes, voted_for, current_term, cluster_size, waiting_put, waiting_put_mid, waiting_put_confirms
+  if len(received_buffer) == 0: return
+
+  remainder = []
+  while len(received_buffer) > 0:
+    msg = received_buffer.pop(0)
+    
+    if msg['type'] in ['get', 'put']:
+      if waiting_put is not None:
+        remainder.append(msg)
+      else:
+        leader_get_put(msg)
+    
+    elif msg['type'] == 'appent':
+      if msg['term'] > current_term:
+        abdicate()
+        received_buffer = remainder + [msg] + received_buffer
+        return process_buff_foll()
+      else:
+        resp = {'term': current_term, 'success': False}
+        resp = add_headers(resp, msg['src'], 'appent_res')
+        replica_response_buffer.append(json.dumps(resp))
+
+    elif msg['type'] == 'appent_res':
+      if msg['term'] > current_term:
+        abdicate()
+        received_buffer = remainder + received_buffer
+        return process_buff_foll()
+      elif msg['success'] == False:
+        next_index[msg['src']] = msg['nextIndex'] # we failed an eppent, so set the next index to what the replica told us to (minus 1 currently)
+      else:
+        next_index[msg['src']] = msg['nextIndex']
+        match_index[msg['src']] = msg['nextIndex'] - 1 # we know everything up until the next index is replicated
+        if waiting_put_mid is not None:
+          if msg.get('forMID') == waiting_put_mid:
+            waiting_put_confirms.add(msg['src'])
+            if len(waiting_put_confirms) > (cluster_size / 2):
+              commit_index = commit_index + 1
+              last_applied = commit_index
+              kvstore[waiting_put['key']] = waiting_put['value']
+              resp = {'MID': waiting_put_mid}
+              resp = add_headers(resp, waiting_put['src'], 'ok')
+              client_response_buffer.append(json.dumps(resp))
+              waiting_put = None
+              waiting_put_mid = None
+              waiting_put_confirms = set()        
+
+    elif msg['type'] == 'reqvot':
+      if msg['term'] > current_term:
+        abdicate()
+        received_buffer = remainder + [msg] + received_buffer
+        return process_buff_foll()
+      else:
+        resp = {'term': current_term, 'voteGranted': False}
+        resp = add_headers(resp, msg['src'], 'reqvot_res')
+        replica_response_buffer.append(json.dump(resp))
+    
+    elif msg['type'] == 'reqvot_res':
+      if msg['term'] > current_term:
+        abdicate()
+        received_buffer = remainder + received_buffer
+        return process_buff_foll()
+
+  received_buffer = remainder
+
 
 def process_buff_cand():
-  global replica_response_buffer, received_buffer, reqvot_buffer, received_votes, voted_for, current_term, cluster_size
+  global last_event, plica_response_buffer, received_buffer, reqvot_buffer, received_votes, voted_for, current_term, cluster_size
   if len(received_buffer) == 0: return
 
   remainder = []
@@ -634,7 +363,7 @@ def process_buff_cand():
     msg = received_buffer.pop(0)
 
     if msg['type'] == 'reqvote_res':
-
+      
       if msg['term'] > current_term:
         bow_out(msg['term'], msg['leader'])
         received_buffer = remainder + received_buffer
@@ -679,6 +408,7 @@ def process_buff_cand():
     elif msg['type'] in ['get', 'put']: # add gets and puts to remainder, but this might cause a latency spike? maybe should redirect?
       remainder.append(msg)
 
+  received_buffer = remainder
 
 # event loop
 while True:
@@ -704,7 +434,7 @@ while True:
       if (clock - rep_timeouts[rid]['last'] > rep_timeouts[rid]['to']):
         send_message(sock, build_appent(rid))
         rep_timeouts[rid]['last'] = clock
-  elif my_role == FOLL:
+  #elif my_role == FOLL:
     # no special things to send if you're a follower! just listen and respond!    
 
   # receive
