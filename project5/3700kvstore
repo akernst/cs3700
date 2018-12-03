@@ -151,6 +151,8 @@ def send_to_replicas(key, val):
             rid = msg['src'] 
             entries = log[nextIndex[rid]:] 
             prevLogIndex = nextIndex[rid] - 1
+            if prevLogIndex >= len(log):
+              debug("PrevLogIndex too big ! " + str(prevLogIndex) +" >= " + str(len(log)), force=True)
             prevLogTerm = 0 if prevLogIndex == -1 else log[prevLogIndex]['term']
             appents[rid] = json.dumps(build_appent(entries, rid, prevLogIndex, prevLogTerm))
     
@@ -452,3 +454,273 @@ keep track of what our followers know and retry sending them stuff they don't kn
 
 handle appent_res as leader
 """
+# helpers and constants for all replicas
+def et()
+  return random.uniform(0.2, 0.5)
+
+current_term = 0
+voted_for = dict() # map from term -> rid
+log = [{'term': 0}]
+commit_index = 0
+last_applied = 0
+election_timeout = et()
+last_event = time.time()
+leader = 'FFFF'
+kvstore = dict()
+
+def add_headers(msg, dst, typ):
+  global my_id, leader
+  msg['dst'] = dst
+  msg['src'] = my_id
+  msg['leader'] = leader
+  msg['type'] = typ
+  return msg
+
+
+# helpers and constants for leader replicas
+next_index = dict() # map from rid to log index
+match_index = dict() # map from rid to log index
+rep_timeouts = dict()
+LEAD = 'leader'
+CAND = 'candidate'
+FOLL = 'follower'
+my_role = FOLL
+waiting_put = None
+waiting_put_mid = None
+waiting_put_confirms = set()
+
+# helpers and constants for candidate replicas
+received_votes = set()
+
+# buffers 
+reqvot_buffer = {} # requested votes buffer to send, mapping from rid to raw json msg
+received_buffer = [] # items received but not acted upon yet
+client_response_buffer = [] # responses that need to be sent to the client
+replica_response_buffer = [] # responses that need to be sent to other replicas
+
+# election cycle
+def abdicate(new_term, new_leader):
+  global b_appent_buffer, last_event, appent_buffer, next_index, match_index, rep_timeouts, my_role, current_term, leader, waiting_put, waiting_put_mid, waiting_put_confirms
+  current_term = new_term   
+  leader = new_leader
+  next_index = dict()
+  match_index = dict()
+  rep_timeouts = dict()
+  b_appent_buffer = []
+  appent_buffer = []
+  my_role = FOLL
+  last_event = time.time()
+  # redirect waiting put
+  if waiting_put is not None:
+    redirect(waiting_put)
+  waiting_put = None
+  waiting_put_mid = None
+  waiting_put_confirms = set()
+  return
+
+def bow_out(new_term, new_leader):
+  global current_term, received_votes, my_role, leader, reqvot_buffer
+  my_role = FOLL
+  current_term = new_term
+  leader = new_leader
+  reqvot_buffer = {}
+  last_event = time.time()
+  received_votes = set()
+  return
+
+def nominate():
+  global my_role, voted_for, last_event, received_votes, current_term, election_timeout, replica_ids, my_id, reqvot_buffer
+  my_role = CAND 
+  current_term = current_term + 1
+  election_timeout = et()
+  last_event = time.time()
+  voted_for[current_term] = my_id
+  received_votes = set([my_id])
+  for rid in replica_ids:
+    rep_timeouts[rid] = {'to': 0.1, 'last': 0}
+    req = {'term': currentTerm, 'candidateId': my_id, 'lastLogIndex': len(log) - 1, 'lastLogTerm': log[-1]['term']}
+    req = add_headers(req, rid, 'reqvot')
+    regvot_buffer[rid] = json.dumps(req)
+  return
+
+def inaugurate():
+  global leader, my_role, rep_timeouts, match_index, reqvot_buffer, next_index, replica_ids, my_id, appent_buffer, log, commit_index
+  my_role = LEAD
+  leader = my_id
+  reqvot_buffer = {}
+  received_votes = set()
+  for rid in replica_ids:
+    rep_timeouts[rid] = {'to': 0.1, 'last': 0}
+    next_index[rid] = len(log)
+    match_index[rid] = 0
+    req = {'term': currentTerm, 'leaderId': leader, 'prevLogIndex': 0, 'prevLogTerm': 0, 'entries': [], 'leaderCommit': commit_index}
+    req = add_headers(req, rid, 'appent')
+    appent_buffer.append(req)
+  return
+
+# message handling
+def redirect(msg):
+  global my_id, client_response_buffer
+  resp = {'MID': msg['MID']}
+  resp = add_headers(resp, my_id, 'redirect')
+  return client_response_buffer.append(json.dumps(resp))
+
+def leader_get_put(msg):
+  global log, replica_ids, kvstore, my_id, client_response_buffer, current_term, waiting_put, waiting_put_confirms, waiting_put_mid
+  if msg['type'] == 'get':
+    value = kvstore.get(msg['key'], "")
+    resp = {'value': value, 'MID': msg['MID']}
+    resp = add_headers(resp, msg['src'], 'ok')
+    return client_response_buffer.append(json.dumps(resp))
+  else:
+    new_entry = {'key': msg['key'], 'value': msg['value'], 'term': current_term}
+    log.append(new_entry)
+    waiting_put = msg
+    waiting_put_mid = msg['mid']
+    waiting_put_confirms = set([my_id])
+    return
+    
+def build_appent(rid):
+  global current_term, log, next_index, commit_index, leader, waiting_put_mid
+  appent = {'term': current_term, 'leaderId': leader, 'prevLogIndex': next_index[rid] - 1, 'prevLogTerm': log[next_index[rid] - 1], 'leaderCommit': commit_index}
+  entries = [] if next_index[rid] >= len(log) else log[next_index[rid]:]
+  if len(entries) > 100:
+    entries = entries[0:100]
+  elif waiting_put_mid is not None:
+    appent['forMID'] = waiting_put_mid
+  appent['entries'] = entries
+  appent = add_headers(appent, rid, 'appent')
+  return json.dumps(appent)
+
+# io
+
+def receive_message(sock):
+  ready = select.select([sock], [], [], 0.01)[0]
+  msg = None
+  if sock in ready:
+    msg_raw = sock.recv(32768)
+    if len(msg_raw) == 0: return None
+    msg = json.loads(msg_raw)
+  return msg
+
+def send_message(sock, msg):
+  return sock.send(msg)
+
+def read_all(sock)
+  global received_buffer
+  while True:
+    msg = receive_message(sock)
+    if msg is None: 
+      return
+    else: 
+      received_buffer.append(msg)
+    
+
+  
+
+# process functions for each role
+def process_buff_foll():
+  global replica_response_buffer, received_buffer, reqvot_buffer, received_votes, voted_for, current_term, cluster_size
+
+def process_buff_lead():
+  global replica_response_buffer, received_buffer, reqvot_buffer, received_votes, voted_for, current_term, cluster_size
+
+def process_buff_cand():
+  global replica_response_buffer, received_buffer, reqvot_buffer, received_votes, voted_for, current_term, cluster_size
+  if len(received_buffer) == 0: return
+
+  remainder = []
+  while len(received_buffer) > 0:
+    msg = received_buffer.pop(0)
+
+    if msg['type'] == 'reqvote_res':
+
+      if msg['term'] > current_term:
+        bow_out(msg['term'], msg['leader'])
+        received_buffer = remainder + received_buffer
+        return process_buff_foll() # convert to follower    
+      if msg['term'] == current_term and msg['voteGranted'] == True:
+        received_votes.add(msg['src'])
+        reqvot_buffer.pop(msg['src'])
+        if len(received_votes) > (cluster_size / 2):
+          inaugurate()
+          received_buffer = remainder + received_buffer
+          return process_buff_lead() # convert to leader and co        
+  
+    elif msg['type'] == 'reqvot':
+    
+      if msg['term'] > current_term:
+        bow_out(msg['term'], msg['leader'])
+        # don't deal with actually voting, let the follower function handle that
+        received_buffer = remainder + [msg] + received_buffer
+        return process_buff_foll() # convert to follower
+      else:
+        resp = {'term': current_term, 'voteGranted': False}
+        resp = add_headers(resp, msg['src'], 'reqvot_res')
+        replica_response_buffer.append(json.dumps(resp))
+
+    elif msg['type'] == 'appent':
+
+      if msg['term'] >= current_term:
+        bow_out(msg['term'], msg['leader'])
+        received_buffer = remainder + [msg] + received_buffer
+        return process_buff_foll()
+      else:
+        resp = {'term': current_term, 'success': False}
+        resp = add_headers(resp, msg['src'], 'appent_res')
+        replica_response_buffer.append(json.dumps(resp))
+
+    elif msg['type'] == 'appent_res':
+      if msg['term'] >= current_term:
+        bow_out(msg['term'], msg['leader'])
+        received_buffer = remainder + received_buffer
+        return process_buff_foll() 
+    
+    elif msg['type'] in ['get', 'put']: # add gets and puts to remainder, but this might cause a latency spike? maybe should redirect?
+      remainder.append(msg)
+
+
+# event loop
+while True:
+
+  # always respond to clients if you can
+  for msg in client_response_buffer:
+    send_message(sock, msg)
+
+  # always respond to other replicas if you can
+  for msg in replica_response_buffer:
+    send_message(sock, msg)
+
+  # send
+  if my_role == CAND:
+    clock = time.time()
+    for rid in replica_ids:
+      if (clock - rep_timeouts[rid]['last'] > rep_timeouts[rid]['to']) and reqvot_buffer.get(rid): # send reqvot
+        send_message(sock, reqvot_buffer[rid])
+        rep_timeouts[rid]['last'] = clock
+  elif my_role == LEAD:
+    clock = time.time()
+    for rid in replica_ids:
+      if (clock - rep_timeouts[rid]['last'] > rep_timeouts[rid]['to']):
+        send_message(sock, build_appent(rid))
+        rep_timeouts[rid]['last'] = clock
+  elif my_role == FOLL:
+    # no special things to send if you're a follower! just listen and respond!    
+
+  # receive
+  read_all(sock)
+
+  # process
+  if my_role == CAND:
+    process_buff_cand()
+  elif my_role == LEAD:
+    process_buff_lead()
+  elif my_role == FOLL:
+    process_buff_foll()
+
+  # timeout test
+  if my_role != LEAD and time.time() - last_event > election_timeout:
+    nominate()
+
+
+  
