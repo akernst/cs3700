@@ -46,7 +46,7 @@ def debug(msg, **kwargs):
 
 # helpers and constants for all replicas
 def et():
-  return random.uniform(0.1, 0.5)
+  return random.uniform(0.1, 0.3)
 
 current_term = 0
 voted_for = dict() # map from term -> rid
@@ -327,8 +327,9 @@ def process_buff_lead():
       elif msg['success'] == False:
         next_index[msg['src']] = msg['nextIndex'] # we failed an eppent, so set the next index to what the replica told us to (minus 1 currently)
       else:
-        next_index[msg['src']] = msg['nextIndex']
-        match_index[msg['src']] = msg['nextIndex'] - 1 # we know everything up until the next index is replicated
+        next_idx_temp = min(msg['nextIndex'], len(log))
+        next_index[msg['src']] = next_idx_temp
+        match_index[msg['src']] = next_idx_temp - 1 # we know everything up until the next index is replicated
         if waiting_put_mid is not None:
           if msg.get('forMID') == waiting_put_mid:
             waiting_put_confirms.add(msg['src'])
