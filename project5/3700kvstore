@@ -47,7 +47,7 @@ debug("", force=True)
 
 # helpers and constants for all replicas
 def et():
-  return random.uniform(0.2, 0.5)
+  return random.uniform(0.1, 0.3)
 
 current_term = 0
 voted_for = dict() # map from term -> rid
@@ -79,7 +79,7 @@ my_role = FOLL
 waiting_put = None
 waiting_put_mid = None
 waiting_put_confirms = set()
-
+waiting_timestamp = time.time()
 # helpers and constants for candidate replicas
 received_votes = set()
 
@@ -137,7 +137,7 @@ def nominate():
 
 def inaugurate():
   debug('Inaugurating myself!')
-  global leader, my_role, rep_timeouts, match_index, reqvot_buffer, next_index, replica_ids, my_id, appent_buffer, log, commit_index
+  global leader, my_role, rep_timeouts, match_index, reqvot_buffer, next_index, replica_ids, my_id, log, commit_index
   my_role = LEAD
   leader = my_id
   reqvot_buffer = {}
@@ -148,7 +148,6 @@ def inaugurate():
     match_index[rid] = 0
     req = {'term': current_term, 'leaderId': leader, 'prevLogIndex': 0, 'prevLogTerm': 0, 'entries': [], 'leaderCommit': commit_index}
     req = add_headers(req, rid, 'appent')
-    appent_buffer.append(req)
   return
 
 # message handling
@@ -159,7 +158,7 @@ def redirect(msg):
   return client_response_buffer.append(json.dumps(resp))
 
 def leader_get_put(msg):
-  global log, replica_ids, kvstore, my_id, client_response_buffer, current_term, waiting_put, waiting_put_confirms, waiting_put_mid
+  global log, replica_ids, waiting_timestamp, kvstore, my_id, client_response_buffer, current_term, waiting_put, waiting_put_confirms, waiting_put_mid
   if msg['type'] == 'get':
     value = kvstore.get(msg['key'], "")
     resp = {'value': value, 'MID': msg['MID']}
@@ -169,13 +168,14 @@ def leader_get_put(msg):
     new_entry = {'key': msg['key'], 'value': msg['value'], 'term': current_term}
     log.append(new_entry)
     waiting_put = msg
-    waiting_put_mid = msg['mid']
+    waiting_put_mid = msg['MID']
     waiting_put_confirms = set([my_id])
+    waiting_timestamp = time.time()
     return
     
 def build_appent(rid):
   global current_term, log, next_index, commit_index, leader, waiting_put_mid
-  appent = {'term': current_term, 'leaderId': leader, 'prevLogIndex': next_index[rid] - 1, 'prevLogTerm': log[next_index[rid] - 1], 'leaderCommit': commit_index}
+  appent = {'term': current_term, 'leaderId': leader, 'prevLogIndex': next_index[rid] - 1, 'prevLogTerm': log[next_index[rid] - 1]['term'], 'leaderCommit': commit_index}
   entries = [] if next_index[rid] >= len(log) else log[next_index[rid]:]
   if len(entries) > 100:
     entries = entries[0:100]
@@ -188,7 +188,7 @@ def build_appent(rid):
 # io
 
 def receive_message(sock):
-  ready = select.select([sock], [], [], 0.01)[0]
+  ready = select.select([sock], [], [], 0.000001)[0]
   msg = None
   if sock in ready:
     msg_raw = sock.recv(32768)
@@ -203,7 +203,7 @@ def read_all(sock):
   global received_buffer
   while True:
     msg = receive_message(sock)
-    if msg is None: 
+    if msg is None:
       return
     else: 
       received_buffer.append(msg)
@@ -247,13 +247,15 @@ def process_buff_foll():
         resp = add_headers(resp, msg['src'], 'appent_res')
         replica_response_buffer.append(json.dumps(resp))
       else: # we can append
+        leader = msg['leader']
+        current_term = msg['term']
         if len(msg['entries']) > 0: # but we only want to modify the log if its not simply a heartbeat
           log = log[0:msg['prevLogIndex']+1]
           for entry in msg['entries']:
             log.append(entry)
           if msg['leaderCommit'] > commit_index:
             commit_index = min(msg['leaderCommit'], len(log) - 1)
-            while commit_index > lastApplied:
+            while commit_index > last_applied:
               last_applied = last_applied+1
               kvstore[log[last_applied]['key']] = log[last_applied]['value']
         resp = {'term': current_term, 'success': True, 'nextIndex': len(log)}
@@ -263,6 +265,7 @@ def process_buff_foll():
         replica_response_buffer.append(json.dumps(resp))
 
     elif msg['type'] == 'reqvot':
+      debug('Received request for vote from ' + str(msg['src']))
       last_event = time.time()
       if msg['term'] < current_term:
         resp = {'term': current_term, 'voteGranted': False}
@@ -272,6 +275,7 @@ def process_buff_foll():
         current_term = msg['term']
         leader = 'FFFF' # we must have moved onto a new term, so we don't know who the leader is!
         if voted_for.get(current_term, msg['candidateId']) == msg['candidateId'] and is_log_current(msg['lastLogTerm'], msg['lastLogIndex']):
+          debug('Granting')
           voted_for[current_term] = msg['candidateId']
           resp = {'voteGranted': True, 'term': current_term}
           resp = add_headers(resp, msg['src'], 'reqvot_res')
@@ -288,7 +292,7 @@ def process_buff_foll():
   received_buffer = remainder
 
 def process_buff_lead():
-  global next_index, match_index, kvstore, commit_index, last_applied, leader, client_response_buffer, log, replica_response_buffer, received_buffer, reqvot_buffer, received_votes, voted_for, current_term, cluster_size, waiting_put, waiting_put_mid, waiting_put_confirms
+  global next_index, match_index, kvstore, rep_timeouts, commit_index, last_applied, leader, client_response_buffer, log, replica_response_buffer, received_buffer, reqvot_buffer, received_votes, voted_for, current_term, cluster_size, waiting_put, waiting_put_mid, waiting_put_confirms
   if len(received_buffer) == 0: return
 
   remainder = []
@@ -303,7 +307,7 @@ def process_buff_lead():
     
     elif msg['type'] == 'appent':
       if msg['term'] > current_term:
-        abdicate()
+        abdicate(msg['term'], msg['leader'])
         received_buffer = remainder + [msg] + received_buffer
         return process_buff_foll()
       else:
@@ -312,8 +316,9 @@ def process_buff_lead():
         replica_response_buffer.append(json.dumps(resp))
 
     elif msg['type'] == 'appent_res':
+      rep_timeouts[msg['src']]['last'] = time.time()
       if msg['term'] > current_term:
-        abdicate()
+        abdicate(msg['term'], msg['leader'])
         received_buffer = remainder + received_buffer
         return process_buff_foll()
       elif msg['success'] == False:
@@ -324,7 +329,8 @@ def process_buff_lead():
         if waiting_put_mid is not None:
           if msg.get('forMID') == waiting_put_mid:
             waiting_put_confirms.add(msg['src'])
-            if len(waiting_put_confirms) > (cluster_size / 2):
+            if len(waiting_put_confirms) > (cluster_size / 2):              
+              debug('TIME TAKEN: '+str(time.time() - waiting_timestamp))
               commit_index = commit_index + 1
               last_applied = commit_index
               kvstore[waiting_put['key']] = waiting_put['value']
@@ -337,7 +343,7 @@ def process_buff_lead():
 
     elif msg['type'] == 'reqvot':
       if msg['term'] > current_term:
-        abdicate()
+        abdicate(msg['term'], msg['leader'])
         received_buffer = remainder + [msg] + received_buffer
         return process_buff_foll()
       else:
@@ -347,7 +353,7 @@ def process_buff_lead():
     
     elif msg['type'] == 'reqvot_res':
       if msg['term'] > current_term:
-        abdicate()
+        abdicate(msg['term'], msg['leader'])
         received_buffer = remainder + received_buffer
         return process_buff_foll()
 
@@ -361,8 +367,9 @@ def process_buff_cand():
   remainder = []
   while len(received_buffer) > 0:
     msg = received_buffer.pop(0)
-
-    if msg['type'] == 'reqvote_res':
+    
+    if msg['type'] == 'reqvot_res':
+      debug('Received vote from ' + str(msg['src']) + " " + str(msg['voteGranted']))
       
       if msg['term'] > current_term:
         bow_out(msg['term'], msg['leader'])
@@ -370,14 +377,16 @@ def process_buff_cand():
         return process_buff_foll() # convert to follower    
       if msg['term'] == current_term and msg['voteGranted'] == True:
         received_votes.add(msg['src'])
-        reqvot_buffer.pop(msg['src'])
+        if msg['src'] in reqvot_buffer:
+          reqvot_buffer.pop(msg['src'])
         if len(received_votes) > (cluster_size / 2):
           inaugurate()
           received_buffer = remainder + received_buffer
           return process_buff_lead() # convert to leader and co        
   
     elif msg['type'] == 'reqvot':
-    
+      debug("Received request for vote from " + str(msg['src']))
+      
       if msg['term'] > current_term:
         bow_out(msg['term'], msg['leader'])
         # don't deal with actually voting, let the follower function handle that
@@ -412,15 +421,16 @@ def process_buff_cand():
 
 # event loop
 while True:
-
   # always respond to clients if you can
   for msg in client_response_buffer:
     send_message(sock, msg)
+  client_response_buffer = []
 
   # always respond to other replicas if you can
   for msg in replica_response_buffer:
     send_message(sock, msg)
-
+  replica_response_buffer = []
+ 
   # send
   if my_role == CAND:
     clock = time.time()
@@ -439,7 +449,7 @@ while True:
 
   # receive
   read_all(sock)
-
+  
   # process
   if my_role == CAND:
     process_buff_cand()
@@ -450,7 +460,7 @@ while True:
 
   # timeout test
   if my_role != LEAD and time.time() - last_event > election_timeout:
-    nominate()
+   nominate()
 
 
-  
+
