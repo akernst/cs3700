@@ -29,6 +29,8 @@ sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
 sock.connect(my_id)
 
 
+my_log_file = open(str(my_id) + ".txt", "w")
+
 DEBUG = False
 
 
@@ -43,10 +45,13 @@ def debug(msg, **kwargs):
     clock = time.time()
     print(my_color + "Replica " + str(my_id) + " :: " + str(clock) + " (" + str(clock-init_time) + ") :: " + msg + '\033[0m')
 
+def filelog(msg):
+  clock = time.time()
+  my_log_file.write(str(time.time()) + "\t" + msg + "\n\n")
 
 # helpers and constants for all replicas
 def et():
-  return random.uniform(0.1, 0.3)
+  return random.uniform(0.7, 1)
 
 current_term = 0
 voted_for = dict() # map from term -> rid
@@ -149,6 +154,9 @@ def inaugurate():
     match_index[rid] = 0
     req = {'term': current_term, 'leaderId': leader, 'prevLogIndex': 0, 'prevLogTerm': 0, 'entries': [], 'leaderCommit': commit_index}
     req = add_headers(req, rid, 'appent')
+
+  uncommitted_log_entries = [] if commit_index + 1 == len(log) else log[commit_index+1:]
+  debug("Uncommitted! " + json.dumps(uncommitted_log_entries))
   return
 
 # message handling
@@ -162,11 +170,11 @@ def leader_get_put(msg):
   global log, replica_ids, waiting_timestamp, kvstore, my_id, client_response_buffer, current_term, waiting_put, waiting_put_confirms, waiting_put_mid, rep_timeouts
   if msg['type'] == 'get':
     value = kvstore.get(msg['key'], "")
-    resp = {'value': value, 'MID': msg['MID']}
+    resp = {'value': value, 'key': msg['key'], 'MID': msg['MID']}
     resp = add_headers(resp, msg['src'], 'ok')
     return client_response_buffer.append(json.dumps(resp))
   else:
-    new_entry = {'key': msg['key'], 'value': msg['value'], 'term': current_term}
+    new_entry = {'client': msg['src'], 'forMID': msg['MID'], 'key': msg['key'], 'value': msg['value'], 'term': current_term}
     log.append(new_entry)
     for repto in rep_timeouts.itervalues():
       repto['last'] = 0
@@ -335,15 +343,16 @@ def process_buff_lead():
           if msg.get('forMID') == waiting_put_mid:
             waiting_put_confirms.add(msg['src'])
             if len(waiting_put_confirms) > (cluster_size / 2.0):              
-              debug("Leader committing log idx " + (str(commit_index + 1)) + str(leader))
+              debug("Leader committing log idx " + (str(commit_index + 1)))
               commit_index = len(log) - 1
-              resp = {'MID': waiting_put_mid}
-              resp = add_headers(resp, waiting_put['src'], 'ok')
-              client_response_buffer.append(json.dumps(resp))
+              #resp = {'MID': waiting_put_mid}
+              #resp = add_headers(resp, waiting_put['src'], 'ok')
+              #client_response_buffer.append(json.dumps(resp))
+              #debug(json.dumps(waiting_put), force=True)
               waiting_put = None
               waiting_put_mid = None
               waiting_put_confirms = set()    
-    
+      
       for n in range(commit_index+1, len(log)):
         count = 0
         for rid in replica_ids:
@@ -357,6 +366,9 @@ def process_buff_lead():
       while last_applied < commit_index:
         last_applied = last_applied + 1
         kvstore[log[last_applied]['key']] = log[last_applied]['value']
+        response = {'MID': log[last_applied]['forMID']}
+        response = add_headers(response, log[last_applied]['client'], "ok")
+        client_response_buffer.append(json.dumps(response))        
 
     elif msg['type'] == 'reqvot':
       if msg['term'] > current_term:
@@ -396,7 +408,7 @@ def process_buff_cand():
         received_votes.add(msg['src'])
         if msg['src'] in reqvot_buffer:
           reqvot_buffer.pop(msg['src'])
-        if len(received_votes) > (cluster_size / 2):
+        if len(received_votes) > (cluster_size / 2.0):
           inaugurate()
           received_buffer = remainder + received_buffer
           return process_buff_lead() # convert to leader and co        
