@@ -258,7 +258,7 @@ def process_buff_foll():
             log.append(entry)
         if msg['leaderCommit'] > commit_index:
           commit_index = min(msg['leaderCommit'], len(log) - 1)
-          debug("Committed to " + str(commit_index) + str(leader), force=True)
+          debug("Committed to " + str(commit_index) + str(leader))
           while commit_index > last_applied:
             last_applied = last_applied+1
             kvstore[log[last_applied]['key']] = log[last_applied]['value']
@@ -335,16 +335,28 @@ def process_buff_lead():
           if msg.get('forMID') == waiting_put_mid:
             waiting_put_confirms.add(msg['src'])
             if len(waiting_put_confirms) > (cluster_size / 2.0):              
-              debug("Leader committing log idx " + (str(commit_index + 1)) + str(leader), force=True)
-              commit_index = commit_index + 1
-              last_applied = commit_index
-              kvstore[waiting_put['key']] = waiting_put['value']
+              debug("Leader committing log idx " + (str(commit_index + 1)) + str(leader))
+              commit_index = len(log) - 1
               resp = {'MID': waiting_put_mid}
               resp = add_headers(resp, waiting_put['src'], 'ok')
               client_response_buffer.append(json.dumps(resp))
               waiting_put = None
               waiting_put_mid = None
-              waiting_put_confirms = set()        
+              waiting_put_confirms = set()    
+    
+      for n in range(commit_index+1, len(log)):
+        count = 0
+        for rid in replica_ids:
+          if match_index[rid] >= n and log[n]['term'] == current_term:
+            count = count + 1
+        if count > cluster_size / 2.0:
+          commit_index = n
+        else:
+          break
+
+      while last_applied < commit_index:
+        last_applied = last_applied + 1
+        kvstore[log[last_applied]['key']] = log[last_applied]['value']
 
     elif msg['type'] == 'reqvot':
       if msg['term'] > current_term:
