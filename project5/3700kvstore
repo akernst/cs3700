@@ -28,41 +28,33 @@ my_color = colors[(1 + sorted_ids.index(my_id)) % 256]
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
 sock.connect(my_id)
 
-
-my_log_file = open(str(my_id) + ".txt", "w")
-
+# debug flag
 DEBUG = False
 
-
-######################################
-######## function definitions ########
-######################################
-
+# logging (with pretty colors for replica identification)
 init_time = time.time()
-
 def debug(msg, **kwargs):
   if DEBUG or kwargs.get("force") :
     clock = time.time()
     print(my_color + "Replica " + str(my_id) + " :: " + str(clock) + " (" + str(clock-init_time) + ") :: " + msg + '\033[0m')
 
-def filelog(msg):
-  clock = time.time()
-  my_log_file.write(str(time.time()) + "\t" + msg + "\n\n")
-
-# helpers and constants for all replicas
+# get a new randomized election timeout
 def et():
-  return random.uniform(0.7, 1)
+  return random.uniform(0.7,1)
 
-current_term = 0
-voted_for = dict() # map from term -> rid
-log = [{'term': 0}]
-commit_index = 0
-last_applied = 0
-election_timeout = et()
-last_event = time.time()
-leader = 'FFFF'
-kvstore = dict()
 
+current_term = 0         # replica current term
+voted_for = dict()       # voted for map from term -> rid
+log = [{'term': 0}]      # log for puts
+commit_index = 0         # commit index monotonically increases
+last_applied = 0         # last applied monotonically increases
+election_timeout = et()  # get an initial election timeout
+last_event = time.time() # timestamp of the last event seen from the leader
+leader = 'FFFF'          # leader id
+kvstore = dict()         # state machine
+
+
+# add the headers common to all messages
 def add_headers(msg, dst, typ):
   global my_id, leader
   msg['dst'] = dst
@@ -72,30 +64,29 @@ def add_headers(msg, dst, typ):
   return msg
 
 
-# helpers and constants for leader replicas
-next_index = dict() # map from rid to log index
-match_index = dict() # map from rid to log index
-rep_timeouts = dict()
+next_index = dict()             # map from rid to log index
+match_index = dict()            # map from rid to log index
+rep_timeouts = dict()           # map from rid to {"last": timestamp of the last message received, "to": individual replica timeout}
+
 LEAD = 'leader'
 CAND = 'candidate'
 FOLL = 'follower'
-my_role = FOLL
-waiting_put = None
-waiting_put_mid = None
-waiting_put_confirms = set()
-waiting_timestamp = time.time()
+my_role = FOLL                  # what is my role
+
+waiting_put = None              # put we are waiting on confirming
+waiting_put_mid = None          # message id of the put we are waiting on
+waiting_put_confirms = set()    # the set of replicas who have confirmed the put we are waiting on
+waiting_timestamp = time.time() # when the put we are waiting on was received
 retry_timeout = 0.1
 
-# helpers and constants for candidate replicas
-received_votes = set()
+received_votes = set() # set of replica ids we have received TRUE votes from this term
 
-# buffers 
-reqvot_buffer = {} # requested votes buffer to send, mapping from rid to raw json msg
-received_buffer = [] # items received but not acted upon yet
-client_response_buffer = [] # responses that need to be sent to the client
+reqvot_buffer = {}           # requested votes buffer to send, mapping from rid to raw json msg
+received_buffer = []         # items received but not acted upon yet
+client_response_buffer = []  # responses that need to be sent to the client
 replica_response_buffer = [] # responses that need to be sent to other replicas
 
-# election cycle
+# as leader, abdicate the throne, resetting leader specific values and updating current term, leader, and role
 def abdicate(new_term, new_leader):
   debug('Abdicating!')
   global last_event, next_index, match_index, rep_timeouts, my_role, current_term, leader, waiting_put, waiting_put_mid, waiting_put_confirms
@@ -114,6 +105,7 @@ def abdicate(new_term, new_leader):
   waiting_put_confirms = set()
   return
 
+# as candidate, bow out of the election, resetting candidate specific values and updating current term, leader, and role
 def bow_out(new_term, new_leader):
   debug('Bowing out!')
   global current_term, received_votes, my_role, leader, reqvot_buffer
@@ -125,6 +117,8 @@ def bow_out(new_term, new_leader):
   received_votes = set()
   return
 
+# as follower, nominate myself for election, updating current term and role, voting for myself, and setting candidate specific values
+# also add reqvots to the reqvot buffer
 def nominate():
   debug('Nominating myself!')
   global my_role, voted_for, last_event, retry_timeout, received_votes, current_term, election_timeout, replica_ids, my_id, reqvot_buffer
@@ -141,6 +135,7 @@ def nominate():
     reqvot_buffer[rid] = json.dumps(req)
   return
 
+# as candidate, inaugurate myself as the leader, update role, reset candidate specific values, initialize leader specific values
 def inaugurate():
   debug('Inaugurating myself!')
   global leader, my_role, rep_timeouts, match_index, retry_timeout, reqvot_buffer, next_index, replica_ids, my_id, log, commit_index
@@ -159,20 +154,26 @@ def inaugurate():
   debug("Uncommitted! " + json.dumps(uncommitted_log_entries))
   return
 
-# message handling
+# add a redirect for the given message to the client response buffer
 def redirect(msg):
   global my_id, client_response_buffer
   resp = {'MID': msg['MID']}
   resp = add_headers(resp, my_id, 'redirect')
   return client_response_buffer.append(json.dumps(resp))
 
+# handle a get or a put message as the leader
 def leader_get_put(msg):
   global log, replica_ids, waiting_timestamp, kvstore, my_id, client_response_buffer, current_term, waiting_put, waiting_put_confirms, waiting_put_mid, rep_timeouts
-  if msg['type'] == 'get':
+  
+  # if it's a get, get the value from our kvstore and add the ok response to the client response buffer
+  if msg['type'] == 'get': 
     value = kvstore.get(msg['key'], "")
     resp = {'value': value, 'key': msg['key'], 'MID': msg['MID']}
     resp = add_headers(resp, msg['src'], 'ok')
     return client_response_buffer.append(json.dumps(resp))
+
+  # if it's a put, append the entry to our log, reset the timestamp of the last sent message to each replica (to ensure they get new info immeiately)
+  # also, mark that we must wait on this put before moving on to more client requests
   else:
     new_entry = {'client': msg['src'], 'forMID': msg['MID'], 'key': msg['key'], 'value': msg['value'], 'term': current_term}
     log.append(new_entry)
@@ -184,6 +185,9 @@ def leader_get_put(msg):
     waiting_timestamp = time.time()
     return
     
+# build an append entries RPC for a given replica ID
+# if they are up to date, simply build a heartbeat
+# if they need more than 100 entries, simply send the first 100 of those entries
 def build_appent(rid):
   global current_term, log, next_index, commit_index, leader, waiting_put_mid
   appent = {'term': current_term, 'leaderId': leader, 'prevLogIndex': next_index[rid] - 1, 'prevLogTerm': log[next_index[rid] - 1]['term'], 'leaderCommit': commit_index}
@@ -196,8 +200,7 @@ def build_appent(rid):
   appent = add_headers(appent, rid, 'appent')
   return json.dumps(appent)
 
-# io
-
+# receive s single message on the socket
 def receive_message(sock):
   ready = select.select([sock], [], [], 0.000001)[0]
   msg = None
@@ -207,9 +210,11 @@ def receive_message(sock):
     msg = json.loads(msg_raw)
   return msg
 
+# send a single message on the socket
 def send_message(sock, msg):
   return sock.send(msg)
 
+# read all available messages on the socket into the received buffer
 def read_all(sock):
   global received_buffer
   while True:
@@ -219,9 +224,7 @@ def read_all(sock):
     else: 
       received_buffer.append(msg)
     
-
-  
-
+# determine if the given lastLogTerm and lastLogIndex are up to date with our log
 def is_log_current(lastLogTerm, lastLogIndex):
   global log
   my_last_term = log[-1]['term']
@@ -232,56 +235,70 @@ def is_log_current(lastLogTerm, lastLogIndex):
   else: 
     return lastLogIndex >= len(log) - 1
 
-# process functions for each role
+# process the contents of the received buffer as a follower
 def process_buff_foll():
   global kvstore, commit_index, last_applied, leader, client_response_buffer, log, replica_response_buffer, received_buffer, reqvot_buffer, received_votes, voted_for, current_term, cluster_size, last_event
   if len(received_buffer) == 0: return
 
+  # keep a "leftovers" array of stuff we couldn't process, so we can try again the next time around
   remainder = []
-  while len(received_buffer) > 0:
-    msg = received_buffer.pop(0)
 
+  # pop messages off the received buffer
+  while len(received_buffer) > 0:
+    msg = received_buffer.pop(0) 
+
+    # MSG is a GET or a PUT
     if msg['type'] in ['get', 'put']:
-      if leader == 'FFFF':
-        remainder.append(msg) # deal with it later
-      else:
+      if leader == 'FFFF': # if we get a get or a put without a leader, put it back in our buffer so we can redirect once we have a leader
+        remainder.append(msg) 
+      else:                # if we have a leader, add a redirect to the client response buffer
         resp = {'MID': msg['MID']}
         resp = add_headers(resp, msg['src'], 'redirect')
         client_response_buffer.append(json.dumps(resp))
 
+    # MSG is an APPEND ENTRIES RPC
     elif msg['type'] == 'appent':
-      last_event = time.time()
+      last_event = time.time() # update timestamp of last even from leader
+
+      # if we can't append, respond with success: False
       if msg['term'] < current_term or msg['prevLogIndex'] >= len(log) or msg['prevLogTerm'] != log[msg['prevLogIndex']]['term']:
         resp = {'term': current_term, 'success': False, 'nextIndex': commit_index}
         if msg.get('forMID'): 
           resp['forMID'] = msg['forMID']
         resp = add_headers(resp, msg['src'], 'appent_res')
         replica_response_buffer.append(json.dumps(resp))
-      else: # we can append
-        leader = msg['leader']
+
+      # if we can append, process accordingly
+      else: 
+        leader = msg['leader']                                      # update leader and term with this new information
         current_term = msg['term']
-        if len(msg['entries']) > 0: # but we only want to modify the log if its not simply a heartbeat
-          log = log[0:msg['prevLogIndex']+1]
-          for entry in msg['entries']:
+        if len(msg['entries']) > 0:                                 # but we only want to modify the log if its not simply a heartbeat
+          log = log[0:msg['prevLogIndex']+1]                        # truncate the log to only include stuff through prevLogIndex
+          for entry in msg['entries']:                              # then append all the new entries
             log.append(entry)
-        if msg['leaderCommit'] > commit_index:
+        if msg['leaderCommit'] > commit_index:                      # if the leader's commit index is greater than ours, maybe we can update our commit index
           commit_index = min(msg['leaderCommit'], len(log) - 1)
           debug("Committed to " + str(commit_index) + str(leader))
-          while commit_index > last_applied:
+          while commit_index > last_applied:                        # apply all log messages between last_applied and our (possibly new) commit_index
             last_applied = last_applied+1
             kvstore[log[last_applied]['key']] = log[last_applied]['value']
         resp = {'term': current_term, 'success': True, 'nextIndex': len(log)}
         if msg.get('forMID'):
           resp['forMID'] = msg['forMID']
         resp = add_headers(resp, msg['src'], 'appent_res')
-        replica_response_buffer.append(json.dumps(resp))
+        replica_response_buffer.append(json.dumps(resp))            # add a success response to the replica response buffer
 
+    # MSG is a REQUEST VOTE RPC
     elif msg['type'] == 'reqvot':
       debug('Received request for vote from ' + str(msg['src']))
+
+      # deny vote if their term is less than ours, add the response to the replica response buffer
       if msg['term'] < current_term:
         resp = {'term': current_term, 'voteGranted': False}
         resp = add_headers(resp, msg['src'], 'reqvot_res')
         replica_response_buffer.append(json.dumps(resp))
+      
+      # otherwise grant the vote (as long as we haven't voted for anyone else! update our term and leader and add the vote to the replica response buffer
       else:
         current_term = msg['term']
         leader = 'FFFF' # we must have moved onto a new term, so we don't know who the leader is!
@@ -296,63 +313,77 @@ def process_buff_foll():
           resp = add_headers(resp, msg['src'], 'reqvot_res')
           client_response_buffer.append(json.dumps(resp))
 
+    # MSG is a REQUEST VOTE or APPEND ENTRIES RESPONSE
     elif msg['type'] in ['reqvot_res', 'appent_res']:
+      # update our leader and current term if necessary (it seems extremely unlikely or even impossible that this
+      # situation could ever occur, but better to play it safe!)
       if msg['term'] > current_term:
         leader = msg['leader']
+        current_term = msg['term']
 
-  received_buffer = remainder
+  received_buffer = remainder # put the remaining messages back in the (now empty) response buffer
 
+
+# process the received buffer as a leader
 def process_buff_lead():
   global next_index, match_index, kvstore, rep_timeouts, commit_index, last_applied, leader, client_response_buffer, log, replica_response_buffer, received_buffer, reqvot_buffer, received_votes, voted_for, current_term, cluster_size, waiting_put, waiting_put_mid, waiting_put_confirms
   
   if len(received_buffer) == 0: return
 
-  remainder = []
+  remainder = [] # remainder buffer to hold messages we are unable to immediately process
+
+  # pop messages off the received buffer
   while len(received_buffer) > 0:
     msg = received_buffer.pop(0)
     
+    # MSG is a GET or a PUT
     if msg['type'] in ['get', 'put']:
-      if waiting_put is not None:
+      if waiting_put is not None: # if there's a put we're waiting on, save it to process later
         remainder.append(msg)
-      else:
+      else:                       # otherwise handle it above
         leader_get_put(msg)
     
+    # MSG is an APPEND ENTRIES RPC
     elif msg['type'] == 'appent':
-      if msg['term'] > current_term:
-        abdicate(msg['term'], msg['leader'])
-        received_buffer = remainder + [msg] + received_buffer
-        return process_buff_foll()
-      else:
-        resp = {'term': current_term, 'success': False}
+      if msg['term'] > current_term:                          # if it comes from a higher term
+        abdicate(msg['term'], msg['leader'])                  # abdicate the throne
+        received_buffer = remainder + [msg] + received_buffer # reconstruct the received buffer INCLUDING the current message
+        return process_buff_foll()                            # process what's left as a follower
+
+      else:                                                   # if it come from a term <= current term, add a failure response to the replica response buffer
+        resp = {'term': current_term, 'success': False}      
         resp = add_headers(resp, msg['src'], 'appent_res')
         replica_response_buffer.append(json.dumps(resp))
 
+    # MSG is an APPEND ENTRIES RPC response
     elif msg['type'] == 'appent_res':
-      rep_timeouts[msg['src']]['last'] = time.time()
-      if msg['term'] > current_term:
+      rep_timeouts[msg['src']]['last'] = time.time() # update replica response timestamp
+
+      if msg['term'] > current_term:                 # if the term is higher than ours, abdicate the throne, reconstruct received buffer without current message
         abdicate(msg['term'], msg['leader'])
         received_buffer = remainder + received_buffer
-        return process_buff_foll()
-      elif msg['success'] == False:
-        next_index[msg['src']] = msg['nextIndex'] # we failed an eppent, so set the next index to what the replica told us to (minus 1 currently)
-      else:
+        return process_buff_foll()                   # process as follower
+
+      elif msg['success'] == False:                  # if we failed an append entries set the next index to what the replica told us to
+        next_index[msg['src']] = msg['nextIndex'] 
+      else:                                          # otherwise we had a successful append entries! go us!                                                           
         next_idx_temp = min(msg['nextIndex'], len(log))
-        next_index[msg['src']] = next_idx_temp
-        match_index[msg['src']] = next_idx_temp - 1 # we know everything up until the next index is replicated
-        if waiting_put_mid is not None:
-          if msg.get('forMID') == waiting_put_mid:
-            waiting_put_confirms.add(msg['src'])
+        next_index[msg['src']] = next_idx_temp       # update the next index to send to what the follower told us to (or the len of our log if its too big (it shouldnt be))
+        match_index[msg['src']] = next_idx_temp - 1  # we know everything up until the next index is replicated, so update the match index
+
+        if waiting_put_mid is not None:              # if we are waiting on a put   
+          if msg.get('forMID') == waiting_put_mid:   # and if the appent response we got is for this put
+            waiting_put_confirms.add(msg['src'])     # mark that we have successfully received a confirm for the put we are waiting on
+                                                     # and if we have received quorum
             if len(waiting_put_confirms) > (cluster_size / 2.0):              
               debug("Leader committing log idx " + (str(commit_index + 1)))
-              commit_index = len(log) - 1
-              #resp = {'MID': waiting_put_mid}
-              #resp = add_headers(resp, waiting_put['src'], 'ok')
-              #client_response_buffer.append(json.dumps(resp))
-              #debug(json.dumps(waiting_put), force=True)
+              commit_index = len(log) - 1            # then commit to everything in our log and mark that we are no longer waiting on any put 
               waiting_put = None
               waiting_put_mid = None
               waiting_put_confirms = set()    
       
+      # see if there's anything we can commit to that we haven't committed to yet 
+      # (i think this loop is entirely redundant to the above commit updating but better safe than sorry)
       for n in range(commit_index+1, len(log)):
         count = 0
         for rid in replica_ids:
@@ -363,6 +394,8 @@ def process_buff_lead():
         else:
           break
 
+      # apply everything to our state machine that is inbetween the last applied and our commit index
+      # also add an OK response to our client response buffer for the applied put
       while last_applied < commit_index:
         last_applied = last_applied + 1
         kvstore[log[last_applied]['key']] = log[last_applied]['value']
@@ -370,116 +403,138 @@ def process_buff_lead():
         response = add_headers(response, log[last_applied]['client'], "ok")
         client_response_buffer.append(json.dumps(response))        
 
+    # MSG is a REQUEST VOTE RPC
     elif msg['type'] == 'reqvot':
-      if msg['term'] > current_term:
+
+      if msg['term'] > current_term: # if message comes from a future term, abdicate the throne, reconstruct received buffer including this message
         abdicate(msg['term'], msg['leader'])
         received_buffer = remainder + [msg] + received_buffer
-        return process_buff_foll()
-      else:
+        return process_buff_foll()   # process buffer as follower
+      
+      else:                          # otherwise deny the vote, add the response to the replica response buffer 
         resp = {'term': current_term, 'voteGranted': False}
         resp = add_headers(resp, msg['src'], 'reqvot_res')
         replica_response_buffer.append(json.dumps(resp))
     
+    # MSG is a REQUEST VOTE RESPONSE
     elif msg['type'] == 'reqvot_res':
-      if msg['term'] > current_term:
+      if msg['term'] > current_term: # if term is greater than ours, abdicate, reconstruct received buffer, process as follower (i doubt this will ever happen)
         abdicate(msg['term'], msg['leader'])
         received_buffer = remainder + received_buffer
         return process_buff_foll()
 
-  received_buffer = remainder
+  # reconstruct received buffer from remainder
+  received_buffer = remainder      
 
 
+# process the buffer as a candidate
 def process_buff_cand():
   global last_event, plica_response_buffer, received_buffer, reqvot_buffer, received_votes, voted_for, current_term, cluster_size
   if len(received_buffer) == 0: return
 
-  remainder = []
+  remainder = [] # leftovers buffer
+
+  # pop messages off the buffer until its empty
   while len(received_buffer) > 0:
     msg = received_buffer.pop(0)
     
+    # MSG is REQUEST VOTE RESPONSE
     if msg['type'] == 'reqvot_res':
       debug('Received vote from ' + str(msg['src']) + " " + str(msg['voteGranted']))
       
-      if msg['term'] > current_term:
-        bow_out(msg['term'], msg['leader'])
-        received_buffer = remainder + received_buffer
-        return process_buff_foll() # convert to follower    
-      if msg['term'] == current_term and msg['voteGranted'] == True:
-        received_votes.add(msg['src'])
-        if msg['src'] in reqvot_buffer:
+      if msg['term'] > current_term:                                 # if the term is greater than our current term
+        bow_out(msg['term'], msg['leader'])                          # bow out of the election
+        received_buffer = remainder + received_buffer                # reconstruct the buffer
+        return process_buff_foll()                                   # process buffer as follower
+    
+      if msg['term'] == current_term and msg['voteGranted'] == True: # otherwise if its for this term and they've granted us the vote 
+        received_votes.add(msg['src'])                               # mark that we've received a vote from this replica
+        if msg['src'] in reqvot_buffer:                              # if its not a duplicate vote, remove the request vote rpc from the retry buffer
           reqvot_buffer.pop(msg['src'])
-        if len(received_votes) > (cluster_size / 2.0):
-          inaugurate()
-          received_buffer = remainder + received_buffer
-          return process_buff_lead() # convert to leader and co        
+        if len(received_votes) > (cluster_size / 2.0):               # if we've won the election
+          inaugurate()                                               # inaugurate!
+          received_buffer = remainder + received_buffer              # reconstruct the received buffer
+          return process_buff_lead()                                 # processed the received buffer as the leader  
   
+    # MSG is REQUEST VOTE RPC
     elif msg['type'] == 'reqvot':
       debug("Received request for vote from " + str(msg['src']))
       
-      if msg['term'] > current_term:
+      # if the term is greater than ours, bow out of the election, reconstruct the received message INCLUDING the reqvot, and process as a follower
+      if msg['term'] > current_term:           
         bow_out(msg['term'], msg['leader'])
-        # don't deal with actually voting, let the follower function handle that
         received_buffer = remainder + [msg] + received_buffer
-        return process_buff_foll() # convert to follower
+        return process_buff_foll() 
+    
+      # otherwise deny the vote, add the deny response to the replica response buffer
       else:
         resp = {'term': current_term, 'voteGranted': False}
         resp = add_headers(resp, msg['src'], 'reqvot_res')
         replica_response_buffer.append(json.dumps(resp))
 
+    # MSG is an APPEND ENTRIES RPC
     elif msg['type'] == 'appent':
 
+      # if the term is >= our term, bow out of the election, reconstruct the received message INCLUDING the appent, process as follower
       if msg['term'] >= current_term:
         bow_out(msg['term'], msg['leader'])
         received_buffer = remainder + [msg] + received_buffer
         return process_buff_foll()
+
+      # otherwise deny the append entries request with current term for replica to update itself with
       else:
         resp = {'term': current_term, 'success': False}
         resp = add_headers(resp, msg['src'], 'appent_res')
         replica_response_buffer.append(json.dumps(resp))
 
+    # MSG is an APPEND ENTRIES RESPONSE
     elif msg['type'] == 'appent_res':
+
+      # if their term is greater than or equal to ours, bow out, and process reconstructed buffer as follower (I think this will never happen)
       if msg['term'] >= current_term:
         bow_out(msg['term'], msg['leader'])
         received_buffer = remainder + received_buffer
         return process_buff_foll() 
     
-    elif msg['type'] in ['get', 'put']: # add gets and puts to remainder, but this might cause a latency spike? maybe should redirect?
-      remainder.append(msg)
+    # MSG is a GET or a PUT
+    elif msg['type'] in ['get', 'put']:      
+      remainder.append(msg) # save the message to deal with later
 
-  received_buffer = remainder
+  received_buffer = remainder # reconstruct the received buffer
 
 # event loop
 while True:
-  # always respond to clients if you can
+
+  # always respond to clients immediately if you can
   for msg in client_response_buffer:
     send_message(sock, msg)
   client_response_buffer = []
 
-  # always respond to other replicas if you can
+  # always respond to other replicas immediately if you can
   for msg in replica_response_buffer:
     send_message(sock, msg)
   replica_response_buffer = []
  
-  # send
+  # send reqvots if first time or timed out as candidate
   if my_role == CAND:
     clock = time.time()
     for rid in replica_ids:
-      if (clock - rep_timeouts[rid]['last'] > rep_timeouts[rid]['to']) and reqvot_buffer.get(rid): # send reqvot
+      if (clock - rep_timeouts[rid]['last'] > rep_timeouts[rid]['to']) and reqvot_buffer.get(rid): 
         send_message(sock, reqvot_buffer[rid])
         rep_timeouts[rid]['last'] = clock
+
+  # send appents if first for that index or timed out as leader
   elif my_role == LEAD:
     clock = time.time()
     for rid in replica_ids:
       if (clock - rep_timeouts[rid]['last'] > rep_timeouts[rid]['to']):
         send_message(sock, build_appent(rid))
         rep_timeouts[rid]['last'] = clock
-  #elif my_role == FOLL:
-    # no special things to send if you're a follower! just listen and respond!    
 
   # receive
   read_all(sock)
   
-  # process
+  # process according to role
   if my_role == CAND:
     process_buff_cand()
   elif my_role == LEAD:
@@ -487,9 +542,9 @@ while True:
   elif my_role == FOLL:
     process_buff_foll()
 
-  # timeout test
+  # if we're not the leader and we haven't heard from the leader in a while, nominate ourselves!!!
   if my_role != LEAD and time.time() - last_event > election_timeout:
-   nominate()
+    nominate()
 
 
 
